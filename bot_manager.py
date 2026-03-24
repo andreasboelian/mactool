@@ -26,7 +26,7 @@ def _load_auto_restart() -> bool:
             data = json.loads(_STATE_FILE.read_text())
             _auto_restart_enabled = data.get("auto_restart", True)
         else:
-            _auto_restart_enabled = True  # Default: enabled
+            _auto_restart_enabled = True
     except Exception:
         _auto_restart_enabled = True
     return _auto_restart_enabled
@@ -53,28 +53,44 @@ def set_auto_restart(enabled: bool):
     logger.info(f"Auto-restart {'enabled' if enabled else 'disabled'}")
 
 
-def is_bot_running() -> bool:
-    """Check if BotApp is currently running."""
-    try:
-        result = subprocess.run(
-            ["pgrep", "-x", "BotApp"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return result.returncode == 0
-    except Exception:
+def _get_bot_pids() -> list[str]:
+    """Find all BotApp process IDs using multiple methods."""
+    pids = set()
+
+    # Method 1: pgrep exact name
+    for name in ["BotApp", "botapp"]:
         try:
             result = subprocess.run(
-                ["ps", "aux"],
-                capture_output=True,
-                text=True,
-                timeout=5,
+                ["pgrep", "-x", name],
+                capture_output=True, text=True, timeout=3,
             )
-            return "BotApp" in result.stdout
-        except Exception as e:
-            logger.error(f"Failed to check if BotApp is running: {e}")
-            return False
+            if result.returncode == 0:
+                for pid in result.stdout.strip().split("\n"):
+                    if pid.strip():
+                        pids.add(pid.strip())
+        except Exception:
+            pass
+
+    # Method 2: pgrep by path pattern
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "botapp.app"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0:
+            my_pid = str(os.getpid())
+            for pid in result.stdout.strip().split("\n"):
+                if pid.strip() and pid.strip() != my_pid:
+                    pids.add(pid.strip())
+    except Exception:
+        pass
+
+    return list(pids)
+
+
+def is_bot_running() -> bool:
+    """Check if BotApp is currently running."""
+    return len(_get_bot_pids()) > 0
 
 
 def start_bot() -> bool:
@@ -94,7 +110,6 @@ def start_bot() -> bool:
 
         logger.info(f"Starting BotApp: {bot_path}")
 
-        # Launch via shell so it detaches properly
         subprocess.Popen(
             [bot_path],
             stdout=subprocess.DEVNULL,
@@ -123,34 +138,38 @@ def stop_bot() -> bool:
         # Disable auto-restart FIRST so the scheduler doesn't restart it
         set_auto_restart(False)
 
-        if not is_bot_running():
+        pids = _get_bot_pids()
+        if not pids:
             logger.info("BotApp is not running")
             return True
 
-        logger.info("Stopping BotApp...")
+        logger.info(f"Stopping BotApp (PIDs: {pids})...")
 
-        # Try graceful kill first
-        subprocess.run(
-            ["pkill", "-x", "BotApp"],
-            capture_output=True,
-            timeout=5,
-        )
+        # Graceful kill
+        for pid in pids:
+            try:
+                subprocess.run(["kill", pid], capture_output=True, timeout=2)
+            except Exception:
+                pass
+
         time.sleep(2)
 
         # Force kill if still running
-        if is_bot_running():
-            subprocess.run(
-                ["pkill", "-9", "-x", "BotApp"],
-                capture_output=True,
-                timeout=5,
-            )
+        pids = _get_bot_pids()
+        if pids:
+            logger.info(f"Force killing BotApp (PIDs: {pids})...")
+            for pid in pids:
+                try:
+                    subprocess.run(["kill", "-9", pid], capture_output=True, timeout=2)
+                except Exception:
+                    pass
             time.sleep(1)
 
         if not is_bot_running():
             logger.info("BotApp stopped, auto-restart disabled")
             return True
         else:
-            logger.warning("BotApp still running after kill")
+            logger.warning("BotApp still running after force kill")
             return False
 
     except Exception as e:

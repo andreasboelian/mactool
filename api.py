@@ -665,8 +665,9 @@ async def update_config(update: ConfigUpdate):
 @app.post("/api/bot/restart")
 async def restart_bot_endpoint():
     """Restart Bot.app."""
+    import asyncio
     try:
-        success = restart_bot()
+        success = await asyncio.to_thread(restart_bot)
         return {
             "status": "success" if success else "failed",
             "running": is_bot_running(),
@@ -679,8 +680,9 @@ async def restart_bot_endpoint():
 @app.post("/api/bot/start")
 async def start_bot_endpoint():
     """Start Bot.app."""
+    import asyncio
     try:
-        success = start_bot()
+        success = await asyncio.to_thread(start_bot)
         return {
             "status": "success" if success else "failed",
             "running": is_bot_running(),
@@ -693,8 +695,9 @@ async def start_bot_endpoint():
 @app.post("/api/bot/stop")
 async def stop_bot_endpoint():
     """Stop Bot.app."""
+    import asyncio
     try:
-        success = stop_bot()
+        success = await asyncio.to_thread(stop_bot)
         return {
             "status": "success" if success else "failed",
             "running": is_bot_running(),
