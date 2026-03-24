@@ -26,13 +26,25 @@ _device_state_cache: Dict[str, str] = {}
 
 
 def _load_state_cache():
-    """Load device state from disk (survives service restarts)."""
+    """Load device state from disk (survives service restarts).
+
+    Migrates old format {serial: "online"} to new {serial: {"status": "online", "reported": false}}.
+    """
     global _device_state_cache
     if _device_state_cache:
         return  # Already loaded
     try:
         if _STATE_FILE.exists():
             _device_state_cache = json.loads(_STATE_FILE.read_text())
+            # Migrate old string format to new dict format
+            migrated = False
+            for serial, val in _device_state_cache.items():
+                if isinstance(val, str):
+                    _device_state_cache[serial] = {"status": val, "reported": val == "offline"}
+                    migrated = True
+            if migrated:
+                _save_state_cache()
+                logger.info("Migrated device state to new format")
             logger.info(f"Loaded device state: {len(_device_state_cache)} devices")
     except Exception as e:
         logger.warning(f"Failed to load device state: {e}")
@@ -309,23 +321,86 @@ def get_devices_from_db() -> list[dict]:
     return get_devices_from_supabase()
 
 
+# ── Supabase Status ──────────────────────────────────────────────
+
+
+def _update_supabase_device_status(device_id: str, status: str):
+    """Update adb_status for a device directly in Supabase device table."""
+    try:
+        config = get_config()
+        if not config.supabase_key:
+            return
+        from supabase import create_client
+        client = create_client(config.supabase_url, config.supabase_key)
+        prefixed_id = (
+            f"{config.server_name}_{device_id}"
+            if not device_id.startswith(f"{config.server_name}_")
+            else device_id
+        )
+        client.table("device").update({"adb_status": status}).eq("id", prefixed_id).execute()
+    except Exception as e:
+        logger.debug(f"Failed to update adb_status for {device_id}: {e}")
+
+
+def _check_supabase_resets() -> set[str]:
+    """Check if any device had adb_status externally set to 'online' in Supabase.
+
+    Returns set of device serials that were externally reset.
+    """
+    try:
+        config = get_config()
+        if not config.supabase_key:
+            return set()
+        from supabase import create_client
+        client = create_client(config.supabase_url, config.supabase_key)
+        response = (
+            client.table("device")
+            .select("id, device__id")
+            .like("id", f"{config.server_name}_%")
+            .eq("adb_status", "online")
+            .execute()
+        )
+        reset_serials = set()
+        if response.data:
+            for row in response.data:
+                serial = row.get("device__id", "") or row.get("id", "").split("_", 1)[-1]
+                if serial:
+                    reset_serials.add(serial)
+        return reset_serials
+    except Exception as e:
+        logger.debug(f"Failed to check Supabase resets: {e}")
+        return set()
+
+
 # ── Webhook ───────────────────────────────────────────────────────
 
 
-def send_device_offline_webhook(device_id: str, custom_name: str) -> bool:
-    """Send webhook notification to n8n when device goes offline."""
+def send_batch_offline_webhook(devices: list[dict]) -> bool:
+    """Send ONE batched webhook for all newly-offline devices.
+
+    Payload: {"server": "mac17", "devices": [{"device_id": ..., "custom_name": ..., "serial": ...}]}
+    """
+    if not devices:
+        return True
+
     try:
         config = get_config()
         webhook_url = config.webhook_url
+        if not webhook_url:
+            logger.warning("No webhook_url configured, skipping webhook")
+            return False
+
         prefix = config.server_name
-
-        # Include mac prefix so n8n can route by mac
-        prefixed_id = f"{prefix}_{device_id}" if not device_id.startswith(f"{prefix}_") else device_id
-
         payload = {
             "server": prefix,
-            "device_id": prefixed_id,
-            "custom_name": custom_name,
+            "devices": [
+                {
+                    "device_id": f"{prefix}_{d['id']}" if not d["id"].startswith(f"{prefix}_") else d["id"],
+                    "custom_name": d["name"],
+                    "serial": d["serial"],
+                }
+                for d in devices
+            ],
         }
 
         retry_count = 0
@@ -333,35 +408,27 @@ def send_device_offline_webhook(device_id: str, custom_name: str) -> bool:
 
         while retry_count < max_retries:
             try:
-                response = requests.post(
-                    webhook_url,
-                    json=payload,
-                    timeout=10,
-                )
+                response = requests.post(webhook_url, json=payload, timeout=10)
                 if response.status_code in [200, 201, 204]:
-                    logger.info(f"Webhook sent for device {device_id}: {custom_name}")
+                    serials = [d["serial"] for d in devices]
+                    logger.info(f"Batch webhook sent for {len(devices)} devices: {serials}")
                     return True
                 else:
-                    logger.warning(
-                        f"Webhook returned {response.status_code}: {response.text}"
-                    )
+                    logger.warning(f"Webhook returned {response.status_code}: {response.text}")
                     retry_count += 1
                     if retry_count < max_retries:
                         time.sleep(2**retry_count)
-
             except requests.Timeout:
                 retry_count += 1
-                logger.warning(
-                    f"Webhook timeout (attempt {retry_count}/{max_retries})"
-                )
+                logger.warning(f"Webhook timeout (attempt {retry_count}/{max_retries})")
                 if retry_count < max_retries:
                     time.sleep(2**retry_count)
 
-        logger.error(f"Webhook failed after {max_retries} retries for {device_id}")
+        logger.error(f"Batch webhook failed after {max_retries} retries")
         return False
 
     except Exception as e:
-        logger.error(f"Failed to send webhook: {e}")
+        logger.error(f"Failed to send batch webhook: {e}")
         return False
 
 
@@ -369,12 +436,17 @@ def send_device_offline_webhook(device_id: str, custom_name: str) -> bool:
 
 
 def run_device_monitor_job():
-    """Monitor all devices and send webhook if offline.
+    """Monitor all devices, update Supabase status, send batched webhook.
 
-    1. Get devices from Supabase device table (this mac only)
-    2. Check which ones are connected via ADB on THIS mac
-    3. If offline + not blacklisted + was online before → send webhook
-       (webhook only fires on online→offline transition, persisted across restarts)
+    Flow:
+    1. Load state, get devices from Supabase, get ADB online set
+    2. Check external resets (adb_status == "online" in Supabase) → clear reported
+    3. Per device: check online/offline, update state
+    4. Offline + (was online OR unreported) → add to newly_offline, mark reported
+    5. First check → reported=False, no webhook
+    6. Update adb_status in Supabase
+    7. ONE batched webhook for all newly_offline
+    8. Save state
     """
     logger.info("Starting device monitor job...")
 
@@ -396,36 +468,72 @@ def run_device_monitor_job():
 
         adb_online = get_adb_devices()
 
+        # Check for external resets via Supabase
+        externally_reset = _check_supabase_resets()
+        for serial in externally_reset:
+            cached = _device_state_cache.get(serial)
+            if isinstance(cached, dict) and cached.get("reported"):
+                logger.info(f"Device {serial} externally reset via Supabase")
+                cached["reported"] = False
+
         result = {"checked": 0, "online": 0, "offline": 0, "blacklisted": 0, "webhooks_sent": 0}
+        newly_offline = []
 
         for device in all_devices:
             serial = device["serial"]
-            name = device["name"]
 
             if serial in blacklist or device["id"] in blacklist:
                 result["blacklisted"] += 1
                 continue
 
             result["checked"] += 1
-
             is_online = serial in adb_online
 
-            cached_state = _device_state_cache.get(serial)
-            _device_state_cache[serial] = "online" if is_online else "offline"
+            cached = _device_state_cache.get(serial)
+            # Handle old string format (shouldn't happen after migration, but be safe)
+            if isinstance(cached, str):
+                cached = {"status": cached, "reported": cached == "offline"}
 
             if is_online:
                 result["online"] += 1
+                _device_state_cache[serial] = {"status": "online", "reported": False}
             else:
                 result["offline"] += 1
 
-                # Webhook ONLY on transition: online → offline
-                # (not on first check, not if already offline)
-                if cached_state == "online":
-                    logger.info(f"Device {serial} went OFFLINE (was online). Sending webhook...")
-                    send_device_offline_webhook(serial, name)
-                    result["webhooks_sent"] += 1
-                elif cached_state is None:
+                was_online = cached is not None and cached.get("status") == "online"
+                was_unreported = (
+                    cached is not None
+                    and cached.get("status") == "offline"
+                    and not cached.get("reported", False)
+                )
+
+                if was_online or was_unreported:
+                    newly_offline.append(device)
+                    _device_state_cache[serial] = {"status": "offline", "reported": True}
+                elif cached is None:
+                    # First check — don't report
+                    _device_state_cache[serial] = {"status": "offline", "reported": False}
                     logger.info(f"Device {serial} is offline (first check, no webhook)")
+                else:
+                    # Already reported
+                    _device_state_cache[serial] = {"status": "offline", "reported": True}
+
+            # Update status in Supabase
+            _update_supabase_device_status(device["id"], "online" if is_online else "offline")
+
+        # Send ONE batched webhook for all newly offline devices
+        if newly_offline:
+            serials = [d["serial"] for d in newly_offline]
+            logger.info(f"Devices went offline (reporting): {serials}")
+            success = send_batch_offline_webhook(newly_offline)
+            if success:
+                result["webhooks_sent"] = len(newly_offline)
+            else:
+                # Rollback reported flag so next cycle retries
+                for dev in newly_offline:
+                    s = dev["serial"]
+                    if s in _device_state_cache:
+                        _device_state_cache[s]["reported"] = False
 
         _save_state_cache()
 
@@ -452,6 +560,41 @@ def reset_state_cache():
 
 
 def get_device_state() -> dict:
-    """Get current device state from cache."""
+    """Get current device state from cache.
+
+    Returns {serial: {"status": "online"|"offline", "reported": bool}}.
+    """
     _load_state_cache()
     return _device_state_cache.copy()
+
+
+def reset_device_reported(serial: str) -> bool:
+    """Reset reported flag for a single device so it can be re-reported."""
+    _load_state_cache()
+    if serial not in _device_state_cache:
+        return False
+    state = _device_state_cache[serial]
+    if isinstance(state, dict):
+        state["reported"] = False
+    else:
+        _device_state_cache[serial] = {"status": state, "reported": False}
+    _save_state_cache()
+    logger.info(f"Reset reported flag for device {serial}")
+    return True
+
+
+def reset_all_reported() -> int:
+    """Reset reported flag for all devices. Returns count of reset devices."""
+    _load_state_cache()
+    count = 0
+    for serial in _device_state_cache:
+        state = _device_state_cache[serial]
+        if isinstance(state, dict) and state.get("reported"):
+            state["reported"] = False
+            count += 1
+        elif isinstance(state, str):
+            _device_state_cache[serial] = {"status": state, "reported": False}
+            count += 1
+    _save_state_cache()
+    logger.info(f"Reset reported flag for {count} devices")
+    return count

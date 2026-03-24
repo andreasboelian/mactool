@@ -14,6 +14,8 @@ from device_monitor import (
     restart_adb_device,
     run_device_monitor_job,
     get_device_state,
+    reset_device_reported,
+    reset_all_reported,
 )
 from bot_manager import is_bot_running, start_bot, stop_bot, restart_bot, is_auto_restart_enabled
 from updater import check_for_updates, perform_update
@@ -159,7 +161,10 @@ async def get_dashboard():
             <div class="card">
                 <div style="display:flex;justify-content:space-between;align-items:center;">
                     <h2>Devices</h2>
-                    <button class="btn" onclick="restartAllDevices()" style="background:#e65100;">Restart All</button>
+                    <div>
+                        <button class="btn btn-small" onclick="resetAllReported()" style="background:#ff9800;">Reset All Reported</button>
+                        <button class="btn" onclick="restartAllDevices()" style="background:#e65100;">Restart All</button>
+                    </div>
                 </div>
                 <div style="margin-bottom:10px;">
                     <strong>Blacklist:</strong> <span id="blacklist-display" style="font-size:12px;color:#666;">Loading...</span>
@@ -170,12 +175,13 @@ async def get_dashboard():
                             <th>Serial</th>
                             <th>Name</th>
                             <th>Status</th>
+                            <th>Reported</th>
                             <th>Blacklist</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="devices-tbody">
-                        <tr><td colspan="5" style="text-align: center;">Loading...</td></tr>
+                        <tr><td colspan="6" style="text-align: center;">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -235,7 +241,7 @@ async def get_dashboard():
 
                     const tbody = document.getElementById('devices-tbody');
                     if (!devices || devices.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center;">No devices</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center;">No devices</td></tr>';
                         return;
                     }
 
@@ -255,11 +261,15 @@ async def get_dashboard():
                             ? `<button class="btn btn-small" onclick="toggleBlacklist('${dev.serial}', false)" style="background:#4caf50;">Unblock</button>`
                             : `<button class="btn btn-small" onclick="toggleBlacklist('${dev.serial}', true)" style="background:#999;">Block</button>`;
                         const nameShort = (dev.name || '-').substring(0, 60);
+                        const reportedCell = dev.reported
+                            ? `<span style="color:#f44336;font-weight:bold;">Yes</span> <button class="btn btn-small" onclick="resetReported('${dev.serial}')" style="background:#ff9800;font-size:10px;">Reset</button>`
+                            : `<span style="color:#999;">No</span>`;
                         html += `
                             <tr ${blClass}>
                                 <td style="font-family:monospace;font-size:12px;">${dev.serial || dev.id}</td>
                                 <td style="font-size:12px;">${nameShort}</td>
                                 <td class="${statusClass}">${status}${dev.blacklisted ? ' (blocked)' : ''}</td>
+                                <td>${reportedCell}</td>
                                 <td>${blBtn}</td>
                                 <td>
                                     <button class="btn btn-small" onclick="restartDevice('${dev.serial || dev.id}')">Restart</button>
@@ -439,6 +449,32 @@ async def get_dashboard():
                 }
             }
 
+            async function resetReported(serial) {
+                try {
+                    const resp = await fetch(`/api/devices/${serial}/reset-reported`, { method: 'POST' });
+                    if (resp.ok) loadDevices();
+                    else alert('Failed to reset reported status');
+                } catch (e) {
+                    alert('Error: ' + e.message);
+                }
+            }
+
+            async function resetAllReported() {
+                if (!confirm('Reset reported status for all devices? They will be re-reported if still offline.')) return;
+                try {
+                    const resp = await fetch('/api/devices/reset-all-reported', { method: 'POST' });
+                    if (resp.ok) {
+                        const result = await resp.json();
+                        alert(`Reset ${result.count} device(s)`);
+                        loadDevices();
+                    } else {
+                        alert('Failed to reset');
+                    }
+                } catch (e) {
+                    alert('Error: ' + e.message);
+                }
+            }
+
             async function botStart() {
                 const msgDiv = document.getElementById('bot-status-msg');
                 msgDiv.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Starting Bot...</div>';
@@ -563,10 +599,22 @@ async def get_devices():
         for device in db_devices:
             serial = device["serial"]
             seen_serials.add(serial)
-            device["status"] = (
-                "online" if serial in adb_online
-                else device_state.get(device["id"], "unknown")
-            )
+
+            if serial in adb_online:
+                device["status"] = "online"
+                device["reported"] = False
+            else:
+                state_entry = device_state.get(serial) or device_state.get(device["id"])
+                if isinstance(state_entry, dict):
+                    device["status"] = state_entry.get("status", "unknown")
+                    device["reported"] = state_entry.get("reported", False)
+                elif isinstance(state_entry, str):
+                    device["status"] = state_entry
+                    device["reported"] = state_entry == "offline"
+                else:
+                    device["status"] = "unknown"
+                    device["reported"] = False
+
             device["blacklisted"] = serial in blacklist or device["id"] in blacklist
             result.append(device)
 
@@ -578,6 +626,7 @@ async def get_devices():
                     "name": "(not in database)",
                     "serial": serial,
                     "status": "online",
+                    "reported": False,
                     "blacklisted": serial in blacklist,
                 })
 
@@ -617,6 +666,22 @@ async def restart_all_devices():
     except Exception as e:
         logger.error(f"Restart all devices failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/devices/reset-all-reported")
+async def reset_all_reported_endpoint():
+    """Reset reported flag for all devices."""
+    count = reset_all_reported()
+    return {"status": "reset", "count": count}
+
+
+@app.post("/api/devices/{device_id}/reset-reported")
+async def reset_device_reported_endpoint(device_id: str):
+    """Reset reported flag for a single device."""
+    success = reset_device_reported(device_id)
+    if success:
+        return {"status": "reset", "device_id": device_id}
+    raise HTTPException(status_code=404, detail="Device not found in state cache")
 
 
 @app.post("/api/devices/{device_id}/restart")
