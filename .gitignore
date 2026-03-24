@@ -1,0 +1,27 @@
+# Sensitive config (contains supabase_key, webhook_url)
+config.json
+
+# Runtime state
+device_state.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
+# Logs
+logs/
+*.log
+
+# Temp files
+*.db
+*.tmp
+
+# Diagnostic output
+column_diagnosis.json
+migration_add_columns.sql
+sync_test.log
+
+# macOS
+.DS_Store

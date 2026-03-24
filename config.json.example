@@ -1,0 +1,15 @@
+{
+  "server_name": "mac04",
+  "sync_times": ["09:00", "14:30"],
+  "blacklist": [],
+  "supabase_url": "https://your-project.supabase.co",
+  "supabase_key": "YOUR_SERVICE_ROLE_KEY_HERE",
+  "bot_app_path": "/Applications/botapp.app/Contents/MacOS/BotApp",
+  "adb_path": "adb",
+  "sqlite_db_path": "~/Desktop/GramBotStorage/super.db",
+  "webhook_url": "https://your-n8n-instance/webhook/your-webhook-id",
+  "device_check_interval_hours": 1,
+  "bot_check_interval_minutes": 5,
+  "log_level": "INFO",
+  "github_repo": "your-username/mactool"
+}

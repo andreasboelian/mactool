@@ -1,0 +1,578 @@
+"""SQLite to Supabase synchronization with schema discovery and column mapping."""
+
+import sqlite3
+import shutil
+import logging
+import re
+import requests
+from pathlib import Path
+from datetime import datetime
+import time
+
+from supabase import create_client, Client
+from config import get_config
+
+logger = logging.getLogger(__name__)
+
+# PostgreSQL maximum identifier length
+PG_MAX_IDENTIFIER = 63
+
+# Table mappings: SQLite table → Supabase table
+TABLE_MAPPINGS = {
+    "device": {"sb_table": "device"},
+    "profile": {"sb_table": "profile"},
+    "stats": {"sb_table": "stats"},
+}
+
+
+class SyncError(Exception):
+    """Sync operation error."""
+
+    pass
+
+
+class SyncManager:
+    """Manages SQLite to Supabase synchronization."""
+
+    def __init__(self):
+        config = get_config()
+        self.server_prefix = config.server_name
+        self.db_path = Path(config.sqlite_db_path).expanduser()
+        self.supabase_url = config.supabase_url
+        self.supabase_key = config.supabase_key
+        self.sb_client: Client | None = None
+        # Per-sync caches (reset at start of each sync)
+        self._supabase_columns: dict[str, set[str]] = {}
+        self._skipped_columns: dict[str, list[str]] = {}
+        self._column_maps: dict[str, dict[str, str]] = {}
+        self._init_supabase_client()
+
+    def _init_supabase_client(self):
+        """Initialize Supabase client."""
+        if not self.supabase_key:
+            raise SyncError(
+                "SUPABASE_KEY not configured. Set it in config.json or SUPABASE_KEY env var."
+            )
+        try:
+            self.sb_client = create_client(self.supabase_url, self.supabase_key)
+            logger.info(f"Supabase client initialized: {self.supabase_url}")
+        except Exception as e:
+            logger.error(f"Failed to initialize Supabase client: {e}")
+            raise SyncError(f"Supabase init failed: {e}")
+
+    def _create_temp_db(self) -> Path:
+        """Create temporary copy of SQLite database."""
+        try:
+            if not self.db_path.exists():
+                logger.warning(f"Database {self.db_path} not found.")
+                return None
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            temp_path = Path(f"/tmp/super_{ts}.db")
+            shutil.copy2(self.db_path, temp_path)
+            logger.info(f"Created temp DB copy: {temp_path}")
+            return temp_path
+        except Exception as e:
+            logger.error(f"Failed to create temp DB: {e}")
+            raise SyncError(f"Temp DB creation failed: {e}")
+
+    # ── Schema Discovery ──────────────────────────────────────────────
+
+    def _discover_supabase_columns(self, table_name: str) -> set[str]:
+        """Discover columns in a Supabase table.
+
+        Uses two methods:
+        1. OpenAPI spec (works even for empty tables)
+        2. Fallback: SELECT one row to read column names
+        """
+        headers = {
+            "apikey": self.supabase_key,
+            "Authorization": f"Bearer {self.supabase_key}",
+        }
+
+        # Method 1: OpenAPI spec at /rest/v1/
+        try:
+            resp = requests.get(
+                f"{self.supabase_url}/rest/v1/",
+                headers=headers,
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                schema = resp.json()
+                definitions = schema.get("definitions", {})
+                if table_name in definitions:
+                    props = definitions[table_name].get("properties", {})
+                    cols = set(props.keys())
+                    if cols:
+                        logger.info(
+                            f"Discovered {len(cols)} columns in Supabase '{table_name}' via OpenAPI"
+                        )
+                        return cols
+        except Exception as e:
+            logger.debug(f"OpenAPI discovery failed for '{table_name}': {e}")
+
+        # Method 2: Query one row
+        try:
+            response = (
+                self.sb_client.table(table_name).select("*").limit(1).execute()
+            )
+            if response.data:
+                cols = set(response.data[0].keys())
+                logger.info(
+                    f"Discovered {len(cols)} columns in Supabase '{table_name}' via query"
+                )
+                return cols
+        except Exception as e:
+            logger.debug(f"Query discovery failed for '{table_name}': {e}")
+
+        logger.warning(f"Could not discover columns for Supabase '{table_name}'")
+        return set()
+
+    def _build_column_map(
+        self, table_name: str, sqlite_cols: list[str], supabase_cols: set[str]
+    ) -> dict[str, str]:
+        """Build mapping from SQLite column names to Supabase column names.
+
+        Handles:
+        - Direct matches (same name)
+        - Truncated matches (SQLite name >63 chars, Supabase has truncated version)
+        - Tracks skipped columns (not found in Supabase)
+        """
+        col_map: dict[str, str] = {}  # sqlite_name → supabase_name
+        skipped: list[str] = []
+
+        if not supabase_cols:
+            # No schema info available — send everything with truncated names
+            for col in sqlite_cols:
+                col_map[col] = col[:PG_MAX_IDENTIFIER]
+            logger.warning(
+                f"No Supabase schema for '{table_name}', sending all {len(col_map)} columns "
+                f"(names truncated to {PG_MAX_IDENTIFIER} chars)"
+            )
+            return col_map
+
+        for col in sqlite_cols:
+            # 1. Direct match
+            if col in supabase_cols:
+                col_map[col] = col
+            # 2. Truncated match (for columns > 63 chars)
+            elif len(col) > PG_MAX_IDENTIFIER:
+                truncated = col[:PG_MAX_IDENTIFIER]
+                if truncated in supabase_cols:
+                    col_map[col] = truncated
+                    logger.info(f"Column mapped: '{col}' → '{truncated}'")
+                else:
+                    skipped.append(col)
+            else:
+                skipped.append(col)
+
+        self._skipped_columns[table_name] = skipped
+
+        if skipped:
+            logger.info(
+                f"Column mapping for '{table_name}': "
+                f"{len(col_map)} mapped, {len(skipped)} skipped "
+                f"(not in Supabase)"
+            )
+            if len(skipped) <= 10:
+                for s in skipped:
+                    logger.debug(f"  Skipped: {s}")
+
+        return col_map
+
+    # ── Record Preparation ────────────────────────────────────────────
+
+    def _get_table_columns(self, db_conn: sqlite3.Connection, table: str) -> list[str]:
+        """Get all column names from a SQLite table."""
+        cursor = db_conn.cursor()
+        cursor.execute(f"PRAGMA table_info({table});")
+        cols = cursor.fetchall()
+        return [col[1] for col in cols]
+
+    def _query_table(self, db_conn: sqlite3.Connection, table: str) -> list[dict]:
+        """Query all records from a SQLite table."""
+        cursor = db_conn.cursor()
+        cols = self._get_table_columns(db_conn, table)
+        cols_str = ", ".join(f'"{col}"' for col in cols)
+
+        if table == "stats":
+            query = f"""
+                SELECT {cols_str} FROM {table}
+                WHERE date >= date('now', '-90 days')
+                ORDER BY date DESC;
+            """
+        else:
+            query = f"SELECT {cols_str} FROM {table};"
+
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        result = [dict(zip(cols, row)) for row in rows]
+        logger.info(f"Queried '{table}': {len(result)} rows, {len(cols)} columns")
+        return result
+
+    @staticmethod
+    def _sanitize_value(value):
+        """Sanitize a value for Supabase/PostgreSQL compatibility.
+
+        - Strip \\x00 NULL bytes from strings (PostgreSQL rejects them: error 22P05)
+        - Convert bytes to string
+        - Leave None, int, float as-is
+        """
+        if isinstance(value, str):
+            if "\x00" in value:
+                return value.replace("\x00", "")
+            return value
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace").replace("\x00", "")
+        return value
+
+    def _enrich_record(self, record: dict) -> dict:
+        """Add metadata fields, prefix IDs, and sanitize values."""
+        result = {}
+        for k, v in record.items():
+            result[k] = self._sanitize_value(v)
+
+        result["mac_id"] = self.server_prefix
+        result["ig_server"] = self.server_prefix
+        result["imported_at"] = datetime.now().isoformat()
+        result["change_at"] = None
+
+        if "id" in result and result["id"]:
+            result["id"] = f"{self.server_prefix}_{result['id']}"
+
+        if "profileID" in result and result["profileID"]:
+            result["profileID"] = f"{self.server_prefix}_{result['profileID']}"
+
+        return result
+
+    def _prepare_records(
+        self, table_name: str, records: list[dict]
+    ) -> list[dict]:
+        """Map SQLite records to Supabase-compatible format.
+
+        - Discovers Supabase columns (cached per sync)
+        - Maps column names (truncation for >63 chars)
+        - Filters to only columns that exist in Supabase
+        """
+        if not records:
+            return records
+
+        # Discover Supabase columns (once per table per sync)
+        if table_name not in self._supabase_columns:
+            self._supabase_columns[table_name] = self._discover_supabase_columns(
+                table_name
+            )
+
+        supabase_cols = self._supabase_columns[table_name]
+        sqlite_cols = list(records[0].keys())
+
+        # Build column mapping (once per table per sync)
+        if table_name not in self._column_maps:
+            self._column_maps[table_name] = self._build_column_map(
+                table_name, sqlite_cols, supabase_cols
+            )
+
+        col_map = self._column_maps[table_name]
+
+        # Apply mapping to all records
+        prepared = []
+        for record in records:
+            new_record = {}
+            for sqlite_col, sb_col in col_map.items():
+                if sqlite_col in record:
+                    new_record[sb_col] = record[sqlite_col]
+            prepared.append(new_record)
+
+        if prepared:
+            logger.info(
+                f"Prepared '{table_name}': {len(sqlite_cols)} → {len(prepared[0])} columns"
+            )
+
+        return prepared
+
+    # ── Batch Upsert ──────────────────────────────────────────────────
+
+    def _extract_bad_column(
+        self, error: Exception, batch_keys: set[str], table_name: str
+    ) -> str | None:
+        """Extract the bad column name from a Supabase error message.
+
+        Strategy:
+        1. Find all single-quoted strings in the error
+        2. Skip any that match the table name (avoid confusing table with column)
+        3. Prefer candidates that exist as keys in the current batch
+        4. Fallback to first non-table candidate
+        """
+        error_str = str(error)
+        candidates = re.findall(r"'([^']+)'", error_str)
+
+        # Filter out the table name
+        non_table = [c for c in candidates if c != table_name]
+
+        # Prefer candidates that are actual batch keys
+        for candidate in non_table:
+            if candidate in batch_keys:
+                return candidate
+
+        # Fallback: first non-table candidate
+        if non_table:
+            return non_table[0]
+
+        # Last resort: first candidate at all
+        if candidates:
+            return candidates[0]
+
+        return None
+
+    def _batch_upsert(
+        self, table_name: str, records: list[dict], batch_size: int = 500
+    ):
+        """Batch UPSERT records to Supabase with error recovery.
+
+        When a column-not-found error occurs, the bad column is removed
+        from the current batch AND all subsequent batches (via
+        `_removed_columns` tracking).
+        """
+        if not records:
+            logger.info(f"No records to sync for '{table_name}'")
+            return
+
+        total_batches = (len(records) + batch_size - 1) // batch_size
+        removed_columns: set[str] = set()  # Tracks columns removed across all batches
+
+        for i in range(0, len(records), batch_size):
+            batch = records[i : i + batch_size]
+            batch_num = i // batch_size + 1
+            retry_count = 0
+            max_retries = 3
+
+            # Apply previously-removed columns to this batch
+            if removed_columns:
+                current_batch = [
+                    {k: v for k, v in rec.items() if k not in removed_columns}
+                    for rec in batch
+                ]
+            else:
+                current_batch = batch
+
+            while retry_count < max_retries:
+                try:
+                    self.sb_client.table(table_name).upsert(
+                        current_batch, on_conflict="id"
+                    ).execute()
+                    logger.info(
+                        f"Upserted {len(current_batch)} records to '{table_name}' "
+                        f"(batch {batch_num}/{total_batches})"
+                    )
+
+                    # After successful upsert with removals, update schema cache
+                    if current_batch and removed_columns:
+                        self._supabase_columns[table_name] = set(
+                            current_batch[0].keys()
+                        )
+                        if table_name in self._column_maps:
+                            del self._column_maps[table_name]
+
+                    break
+
+                except Exception as e:
+                    error_msg = str(e).lower()
+
+                    # Handle unique constraint violations (e.g. mac_id has UNIQUE)
+                    if "23505" in error_msg or "unique constraint" in error_msg:
+                        # Extract the constraint name to give a clear fix instruction
+                        constraint_match = re.search(
+                            r'"([^"]+)"', str(e)
+                        )
+                        constraint = constraint_match.group(1) if constraint_match else "unknown"
+                        col_match = re.search(r"Key \(([^)]+)\)", str(e))
+                        col = col_match.group(1) if col_match else "unknown"
+
+                        fix_sql = (
+                            f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{constraint}";'
+                            if constraint != "unknown"
+                            else f"-- Check unique constraints on '{table_name}'"
+                        )
+                        raise SyncError(
+                            f"Unique constraint '{constraint}' on column '{col}' "
+                            f"blocks multi-row insert. "
+                            f"Fix in Supabase SQL Editor: {fix_sql}"
+                        )
+
+                    # Handle column-not-found errors (fallback for undiscovered schema)
+                    if "column" in error_msg and (
+                        "not found" in error_msg
+                        or "does not exist" in error_msg
+                        or "undefined" in error_msg
+                        or "schema cache" in error_msg
+                    ):
+                        batch_keys = set(current_batch[0].keys()) if current_batch else set()
+                        bad_col = self._extract_bad_column(e, batch_keys, table_name)
+                        if bad_col:
+                            logger.warning(
+                                f"Column '{bad_col}' not in Supabase '{table_name}', removing"
+                            )
+                            removed_columns.add(bad_col)
+                            current_batch = [
+                                {k: v for k, v in rec.items() if k != bad_col}
+                                for rec in current_batch
+                            ]
+
+                            # Safety: don't loop forever removing columns
+                            if len(removed_columns) > 50:
+                                raise SyncError(
+                                    f"Too many missing columns in '{table_name}' "
+                                    f"({len(removed_columns)} removed). Check Supabase schema."
+                                )
+                            continue
+
+                    # Other errors: retry with exponential backoff
+                    retry_count += 1
+                    wait_time = 2**retry_count
+                    logger.warning(
+                        f"Upsert error on '{table_name}' "
+                        f"(attempt {retry_count}/{max_retries}): {e}"
+                    )
+                    if retry_count >= max_retries:
+                        raise SyncError(
+                            f"Upsert failed for '{table_name}' after {max_retries} retries: {e}"
+                        )
+                    time.sleep(wait_time)
+
+    # ── Main Sync ─────────────────────────────────────────────────────
+
+    def sync(self) -> dict:
+        """Execute full sync: SQLite → Supabase."""
+        logger.info("=" * 60)
+        logger.info("Starting SQLite → Supabase sync...")
+
+        # Reset per-sync caches
+        self._supabase_columns = {}
+        self._skipped_columns = {}
+        self._column_maps = {}
+
+        sync_result = {"status": "success", "tables": {}}
+        temp_db_path = None
+
+        try:
+            temp_db_path = self._create_temp_db()
+            if not temp_db_path:
+                logger.warning("No database found. Skipping sync.")
+                sync_result["status"] = "no_db"
+                return sync_result
+
+            db_conn = sqlite3.connect(temp_db_path)
+
+            for table_key, mapping in TABLE_MAPPINGS.items():
+                try:
+                    sb_table = mapping["sb_table"]
+                    logger.info(f"--- Syncing table: {table_key} → {sb_table} ---")
+
+                    records = self._query_table(db_conn, table_key)
+                    if not records:
+                        sync_result["tables"][table_key] = {
+                            "status": "no_data",
+                            "count": 0,
+                        }
+                        logger.info(f"  {table_key}: No records to sync")
+                        continue
+
+                    # Enrich with metadata
+                    enriched = [self._enrich_record(rec) for rec in records]
+
+                    # Map columns to Supabase schema
+                    prepared = self._prepare_records(sb_table, enriched)
+
+                    # Upsert to Supabase
+                    self._batch_upsert(sb_table, prepared)
+
+                    table_result = {
+                        "status": "success",
+                        "count": len(records),
+                    }
+                    if sb_table in self._skipped_columns:
+                        table_result["skipped_columns"] = len(
+                            self._skipped_columns[sb_table]
+                        )
+                    if sb_table in self._column_maps:
+                        table_result["columns_synced"] = len(
+                            self._column_maps[sb_table]
+                        )
+
+                    sync_result["tables"][table_key] = table_result
+                    logger.info(
+                        f"  {table_key}: {len(records)} records synced successfully"
+                    )
+
+                except SyncError as e:
+                    logger.error(f"Sync failed for {table_key}: {e}")
+                    sync_result["tables"][table_key] = {
+                        "status": "error",
+                        "error": str(e)[:500],
+                    }
+                    sync_result["status"] = "partial_error"
+                except Exception as e:
+                    logger.error(f"Unexpected error for {table_key}: {e}", exc_info=True)
+                    sync_result["tables"][table_key] = {
+                        "status": "error",
+                        "error": f"{type(e).__name__}: {str(e)[:500]}",
+                    }
+                    sync_result["status"] = "partial_error"
+
+            db_conn.close()
+
+            # Summary
+            if self._skipped_columns:
+                sync_result["skipped_columns"] = {
+                    table: cols for table, cols in self._skipped_columns.items()
+                }
+            if self._column_maps:
+                sync_result["column_mapping"] = {
+                    table: len(m) for table, m in self._column_maps.items()
+                }
+
+            logger.info("Sync completed successfully")
+            logger.info("=" * 60)
+
+        except SyncError as e:
+            logger.error(f"Sync aborted: {e}")
+            sync_result["status"] = "error"
+            sync_result["error"] = str(e)
+
+        except Exception as e:
+            logger.error(f"Unexpected sync error: {e}", exc_info=True)
+            sync_result["status"] = "error"
+            sync_result["error"] = str(e)
+
+        finally:
+            if temp_db_path and temp_db_path.exists():
+                try:
+                    temp_db_path.unlink()
+                    logger.debug(f"Deleted temp DB: {temp_db_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete temp DB: {e}")
+
+        return sync_result
+
+
+# Singleton instance
+_sync_manager: SyncManager | None = None
+
+
+def get_sync_manager() -> SyncManager:
+    """Get singleton SyncManager instance."""
+    global _sync_manager
+    if _sync_manager is None:
+        _sync_manager = SyncManager()
+    return _sync_manager
+
+
+def trigger_sync() -> dict:
+    """Trigger a sync operation."""
+    try:
+        manager = get_sync_manager()
+        return manager.sync()
+    except Exception as e:
+        logger.error(f"Sync trigger failed: {e}")
+        return {"status": "error", "error": str(e)}
