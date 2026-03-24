@@ -110,8 +110,11 @@ def start_bot() -> bool:
 
         logger.info(f"Starting BotApp: {bot_path}")
 
+        # Start via shell with "exit;" — same as manual terminal launch.
+        # This ensures ADB devices are available to the bot.
         subprocess.Popen(
-            [bot_path],
+            f"{bot_path} ; exit;",
+            shell=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
