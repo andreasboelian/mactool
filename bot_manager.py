@@ -132,45 +132,66 @@ def start_bot() -> bool:
         return False
 
 
+def _kill_all_python_except_self():
+    """Kill all Python processes except our own mactool process."""
+    my_pid = str(os.getpid())
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "python"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0:
+            for pid in result.stdout.strip().split("\n"):
+                pid = pid.strip()
+                if pid and pid != my_pid:
+                    try:
+                        subprocess.run(["kill", "-9", pid], capture_output=True, timeout=2)
+                        logger.debug(f"Killed Python process {pid}")
+                    except Exception:
+                        pass
+            logger.info("All Python processes killed (except mactool)")
+    except Exception as e:
+        logger.warning(f"Failed to kill Python processes: {e}")
+
+
 def stop_bot() -> bool:
-    """Stop BotApp and disable auto-restart."""
+    """Stop BotApp, kill all Python scripts, and disable auto-restart."""
     try:
         # Disable auto-restart FIRST so the scheduler doesn't restart it
         set_auto_restart(False)
 
-        pids = _get_bot_pids()
-        if not pids:
-            logger.info("BotApp is not running")
-            return True
-
-        logger.info(f"Stopping BotApp (PIDs: {pids})...")
-
-        # Graceful kill
-        for pid in pids:
-            try:
-                subprocess.run(["kill", pid], capture_output=True, timeout=2)
-            except Exception:
-                pass
-
-        time.sleep(2)
-
-        # Force kill if still running
+        # 1. Kill BotApp
         pids = _get_bot_pids()
         if pids:
-            logger.info(f"Force killing BotApp (PIDs: {pids})...")
+            logger.info(f"Stopping BotApp (PIDs: {pids})...")
             for pid in pids:
                 try:
-                    subprocess.run(["kill", "-9", pid], capture_output=True, timeout=2)
+                    subprocess.run(["kill", pid], capture_output=True, timeout=2)
                 except Exception:
                     pass
-            time.sleep(1)
+            time.sleep(2)
 
-        if not is_bot_running():
-            logger.info("BotApp stopped, auto-restart disabled")
-            return True
+            # Force kill if still running
+            pids = _get_bot_pids()
+            if pids:
+                logger.info(f"Force killing BotApp (PIDs: {pids})...")
+                for pid in pids:
+                    try:
+                        subprocess.run(["kill", "-9", pid], capture_output=True, timeout=2)
+                    except Exception:
+                        pass
+                time.sleep(1)
+
+        # 2. Kill all Python scripts (except our own mactool process)
+        _kill_all_python_except_self()
+
+        bot_stopped = not is_bot_running()
+        if bot_stopped:
+            logger.info("BotApp stopped, Python scripts killed, auto-restart disabled")
         else:
             logger.warning("BotApp still running after force kill")
-            return False
+
+        return bot_stopped
 
     except Exception as e:
         logger.error(f"Failed to stop BotApp: {e}")
