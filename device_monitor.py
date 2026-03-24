@@ -178,6 +178,34 @@ def check_device_online(serial: str) -> bool:
         return False
 
 
+def restart_adb_device(serial: str) -> bool:
+    """Reboot a device via ADB."""
+    adb_cmd = _find_adb()
+    if not adb_cmd:
+        logger.error("ADB not found, cannot restart device")
+        return False
+
+    try:
+        result = subprocess.run(
+            [adb_cmd, "-s", serial, "reboot"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            logger.info(f"Reboot command sent to device {serial}")
+            return True
+        else:
+            logger.error(f"ADB reboot failed for {serial}: {result.stderr}")
+            return False
+    except subprocess.TimeoutExpired:
+        logger.error(f"ADB reboot timed out for {serial}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to reboot device {serial}: {e}")
+        return False
+
+
 # ── Device Sources ────────────────────────────────────────────────
 
 

@@ -11,6 +11,7 @@ from sync import trigger_sync
 from device_monitor import (
     get_adb_devices,
     get_devices_from_db,
+    restart_adb_device,
     run_device_monitor_job,
     get_device_state,
 )
@@ -156,7 +157,10 @@ async def get_dashboard():
             </div>
 
             <div class="card">
-                <h2>Devices</h2>
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <h2>Devices</h2>
+                    <button class="btn" onclick="restartAllDevices()" style="background:#e65100;">Restart All</button>
+                </div>
                 <div style="margin-bottom:10px;">
                     <strong>Blacklist:</strong> <span id="blacklist-display" style="font-size:12px;color:#666;">Loading...</span>
                 </div>
@@ -407,10 +411,31 @@ async def get_dashboard():
                 if (!confirm('Restart device ' + deviceId + '?')) return;
                 try {
                     const resp = await fetch(`/api/devices/${deviceId}/restart`, { method: 'POST' });
-                    if (resp.ok) alert('✓ Restart initiated');
-                    else alert('✗ Restart failed');
+                    if (resp.ok) {
+                        alert('✓ Reboot command sent to ' + deviceId);
+                        setTimeout(loadDevices, 5000);
+                    } else {
+                        const err = await resp.json().catch(() => ({}));
+                        alert('✗ Restart failed: ' + (err.detail || 'unknown error'));
+                    }
                 } catch (e) {
                     alert('✗ Restart failed: ' + e.message);
+                }
+            }
+
+            async function restartAllDevices() {
+                if (!confirm('Restart ALL online devices?')) return;
+                try {
+                    const resp = await fetch('/api/devices/restart-all', { method: 'POST' });
+                    const result = await resp.json();
+                    if (result.status === 'no_devices') {
+                        alert('No online devices found');
+                    } else {
+                        alert(`✓ Restarted ${result.restarted}/${result.total} devices`);
+                        setTimeout(loadDevices, 5000);
+                    }
+                } catch (e) {
+                    alert('✗ Restart all failed: ' + e.message);
                 }
             }
 
@@ -573,13 +598,39 @@ async def check_devices():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/devices/restart-all")
+async def restart_all_devices():
+    """Restart all online ADB devices."""
+    import asyncio
+    try:
+        online = await asyncio.to_thread(get_adb_devices)
+        if not online:
+            return {"status": "no_devices", "restarted": 0}
+
+        results = {}
+        for serial in sorted(online):
+            success = await asyncio.to_thread(restart_adb_device, serial)
+            results[serial] = "ok" if success else "failed"
+
+        ok_count = sum(1 for v in results.values() if v == "ok")
+        return {"status": "done", "restarted": ok_count, "total": len(online), "details": results}
+    except Exception as e:
+        logger.error(f"Restart all devices failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/devices/{device_id}/restart")
 async def restart_device(device_id: str):
-    """Restart a specific device (placeholder)."""
+    """Restart a specific device via ADB reboot."""
+    import asyncio
     try:
-        # This would require ADB integration
-        logger.info(f"Restart request for device {device_id}")
-        return {"status": "restart_initiated", "device_id": device_id}
+        success = await asyncio.to_thread(restart_adb_device, device_id)
+        if success:
+            return {"status": "restart_initiated", "device_id": device_id}
+        else:
+            raise HTTPException(status_code=500, detail="ADB reboot failed")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Device restart failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
