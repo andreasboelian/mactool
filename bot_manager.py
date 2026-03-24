@@ -110,11 +110,11 @@ def start_bot() -> bool:
 
         logger.info(f"Starting BotApp: {bot_path}")
 
-        # Start via shell with "exit;" — same as manual terminal launch.
-        # This ensures ADB devices are available to the bot.
+        # Start via login shell (zsh -l) so the user's full environment
+        # is loaded (.zprofile, .zshrc) — this makes ADB available.
+        # Without login shell, LaunchAgent's minimal PATH won't include ADB.
         subprocess.Popen(
-            f"{bot_path} ; exit;",
-            shell=True,
+            ["zsh", "-l", "-c", f"{bot_path} ; exit;"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,

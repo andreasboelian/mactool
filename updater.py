@@ -1,6 +1,7 @@
 """Self-update from GitHub repository."""
 
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -185,26 +186,20 @@ def perform_update() -> dict:
 
 
 def _schedule_restart():
-    """Restart the service via a detached shell process.
+    """Restart by exiting the process — launchd (KeepAlive=true) restarts it.
 
-    launchctl unload kills the mactool process, so launchctl load must run
-    from a separate process that survives the kill. We use nohup + sh -c
-    to spawn a fully detached shell that sleeps, unloads, then reloads.
+    No unload/load needed. launchctl unload kills the entire process tree
+    including any child shells, so the old approach never worked. Since the
+    LaunchAgent plist has KeepAlive=true, launchd will automatically restart
+    the process after it exits.
     """
-    plist = Path.home() / "Library/LaunchAgents/com.ebm.mactool.plist"
-    if plist.exists():
-        restart_cmd = (
-            f"sleep 2 && launchctl unload {plist} && sleep 1 && launchctl load {plist}"
-        )
-        subprocess.Popen(
-            ["nohup", "sh", "-c", restart_cmd],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        logger.info("Scheduled service restart via detached shell")
-    else:
-        # Fallback: restart python process directly
-        logger.warning("No LaunchAgent plist found, restarting process directly")
-        import os
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+    import threading
+
+    def _do_exit():
+        import time
+        time.sleep(2)  # Let the HTTP response finish
+        logger.info("Exiting for restart (launchd KeepAlive will restart us)...")
+        os._exit(0)
+
+    thread = threading.Thread(target=_do_exit, daemon=False)
+    thread.start()
