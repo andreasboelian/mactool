@@ -185,27 +185,26 @@ def perform_update() -> dict:
 
 
 def _schedule_restart():
-    """Restart the service after a short delay (so the API response gets sent)."""
-    import threading
+    """Restart the service via a detached shell process.
 
-    def _do_restart():
-        import time
-        time.sleep(2)  # Let the HTTP response finish
-        plist = Path.home() / "Library/LaunchAgents/com.ebm.mactool.plist"
-        if plist.exists():
-            subprocess.run(
-                ["launchctl", "unload", str(plist)],
-                capture_output=True, timeout=10,
-            )
-            subprocess.run(
-                ["launchctl", "load", str(plist)],
-                capture_output=True, timeout=10,
-            )
-        else:
-            # Fallback: restart python process
-            logger.warning("No LaunchAgent plist found, restarting process directly")
-            import os
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-
-    thread = threading.Thread(target=_do_restart, daemon=True)
-    thread.start()
+    launchctl unload kills the mactool process, so launchctl load must run
+    from a separate process that survives the kill. We use nohup + sh -c
+    to spawn a fully detached shell that sleeps, unloads, then reloads.
+    """
+    plist = Path.home() / "Library/LaunchAgents/com.ebm.mactool.plist"
+    if plist.exists():
+        restart_cmd = (
+            f"sleep 2 && launchctl unload {plist} && sleep 1 && launchctl load {plist}"
+        )
+        subprocess.Popen(
+            ["nohup", "sh", "-c", restart_cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        logger.info("Scheduled service restart via detached shell")
+    else:
+        # Fallback: restart python process directly
+        logger.warning("No LaunchAgent plist found, restarting process directly")
+        import os
+        os.execv(sys.executable, [sys.executable] + sys.argv)
