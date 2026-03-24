@@ -14,7 +14,7 @@ from device_monitor import (
     run_device_monitor_job,
     get_device_state,
 )
-from bot_manager import is_bot_running, start_bot, stop_bot, restart_bot
+from bot_manager import is_bot_running, start_bot, stop_bot, restart_bot, is_auto_restart_enabled
 from updater import check_for_updates, perform_update
 from scheduler import get_scheduler
 
@@ -108,15 +108,21 @@ async def get_dashboard():
                         <span class="status-value" id="bot-status">Loading...</span>
                     </div>
                     <div class="status">
+                        <span>Auto-Restart:</span>
+                        <span class="status-value" id="auto-restart-status">Loading...</span>
+                    </div>
+                    <div class="status">
                         <span>Scheduler:</span>
                         <span class="status-value" id="scheduler-status">Loading...</span>
                     </div>
                     <button class="btn" id="sync-btn" onclick="triggerSync()">Sync Now</button>
                     <button class="btn" id="device-check-btn" onclick="triggerDeviceCheck()">Check Devices</button>
-                    <button class="btn btn-danger" onclick="restartBot()">Restart Bot</button>
+                    <button class="btn" id="bot-start-btn" onclick="botStart()" style="background:#4caf50;">Start Bot</button>
+                    <button class="btn btn-danger" id="bot-stop-btn" onclick="botStop()">Stop Bot</button>
                     <button class="btn" id="update-btn" onclick="triggerUpdate()" style="background:#ff9800;">Update</button>
                     <div id="sync-status"></div>
                     <div id="device-check-status"></div>
+                    <div id="bot-status-msg"></div>
                     <div id="update-status"></div>
                 </div>
 
@@ -181,6 +187,15 @@ async def get_dashboard():
 
                     document.getElementById('bot-status').textContent = data.bot_running ? '✓ Running' : '✗ Stopped';
                     document.getElementById('bot-status').style.color = data.bot_running ? '#4caf50' : '#f44336';
+
+                    const arEl = document.getElementById('auto-restart-status');
+                    arEl.textContent = data.auto_restart ? '✓ Active' : '✗ Disabled';
+                    arEl.style.color = data.auto_restart ? '#4caf50' : '#f44336';
+
+                    // Show/hide start/stop buttons based on state
+                    document.getElementById('bot-start-btn').style.display = data.bot_running ? 'none' : '';
+                    document.getElementById('bot-stop-btn').style.display = data.bot_running ? '' : 'none';
+
                     document.getElementById('scheduler-status').textContent = '✓ Running';
                     document.getElementById('server-name').textContent = data.server_name;
                     currentSyncTimes = data.sync_times;
@@ -399,16 +414,41 @@ async def get_dashboard():
                 }
             }
 
-            async function restartBot() {
-                if (!confirm('Restart Bot App? This will stop all Python processes.')) return;
+            async function botStart() {
+                const msgDiv = document.getElementById('bot-status-msg');
+                msgDiv.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Starting Bot...</div>';
                 try {
-                    const resp = await fetch('/api/bot/restart', { method: 'POST' });
-                    if (resp.ok) alert('✓ Bot restarting...');
-                    else alert('✗ Restart failed');
-                    setTimeout(loadStatus, 3000);
+                    const resp = await fetch('/api/bot/start', { method: 'POST' });
+                    const result = await resp.json();
+                    if (result.running) {
+                        msgDiv.innerHTML = '<div class="status-msg success">Bot started. Auto-restart enabled.</div>';
+                    } else {
+                        msgDiv.innerHTML = '<div class="status-msg error">Bot failed to start.</div>';
+                    }
+                    setTimeout(loadStatus, 1000);
                 } catch (e) {
-                    alert('✗ Restart failed: ' + e.message);
+                    msgDiv.innerHTML = `<div class="status-msg error">Start failed: ${e.message}</div>`;
                 }
+                setTimeout(() => { msgDiv.innerHTML = ''; }, 10000);
+            }
+
+            async function botStop() {
+                if (!confirm('Stop Bot? Auto-restart will be disabled until you click Start again.')) return;
+                const msgDiv = document.getElementById('bot-status-msg');
+                msgDiv.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Stopping Bot...</div>';
+                try {
+                    const resp = await fetch('/api/bot/stop', { method: 'POST' });
+                    const result = await resp.json();
+                    if (!result.running) {
+                        msgDiv.innerHTML = '<div class="status-msg success">Bot stopped. Auto-restart disabled.</div>';
+                    } else {
+                        msgDiv.innerHTML = '<div class="status-msg error">Bot still running.</div>';
+                    }
+                    setTimeout(loadStatus, 1000);
+                } catch (e) {
+                    msgDiv.innerHTML = `<div class="status-msg error">Stop failed: ${e.message}</div>`;
+                }
+                setTimeout(() => { msgDiv.innerHTML = ''; }, 10000);
             }
 
             async function triggerUpdate() {
@@ -460,6 +500,7 @@ async def get_status():
         return {
             "server_name": config.server_name,
             "bot_running": is_bot_running(),
+            "auto_restart": is_auto_restart_enabled(),
             "sync_times": config.sync_times,
             "jobs": scheduler.get_jobs(),
             "version": update_info.get("current") or update_info.get("version", "-"),
