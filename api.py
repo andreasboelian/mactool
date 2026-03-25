@@ -18,7 +18,7 @@ from device_monitor import (
     reset_all_reported,
 )
 from bot_manager import is_bot_running, start_bot, stop_bot, restart_bot, is_auto_restart_enabled
-from updater import check_for_updates, perform_update
+from updater import check_for_updates, perform_update, get_current_version, get_available_versions
 from scheduler import get_scheduler
 
 logger = logging.getLogger(__name__)
@@ -122,7 +122,11 @@ async def get_dashboard():
                     <button class="btn" id="device-check-btn" onclick="triggerDeviceCheck()">Check Devices</button>
                     <button class="btn" id="bot-start-btn" onclick="botStart()" style="background:#4caf50;">Start Bot</button>
                     <button class="btn btn-danger" id="bot-stop-btn" onclick="botStop()">Stop Bot</button>
-                    <button class="btn" id="update-btn" onclick="triggerUpdate()" style="background:#ff9800;">Update</button>
+                    <button class="btn" id="update-btn" onclick="triggerUpdate()" style="background:#ff9800;">Update to Latest</button>
+                    <select id="version-select" style="padding:6px 10px;border-radius:4px;border:1px solid #ddd;font-size:13px;">
+                        <option value="">Loading versions...</option>
+                    </select>
+                    <button class="btn btn-small" onclick="switchVersion()" style="background:#666;">Switch Version</button>
                     <div id="sync-status"></div>
                     <div id="device-check-status"></div>
                     <div id="bot-status-msg"></div>
@@ -215,8 +219,9 @@ async def get_dashboard():
                     if (data.version) {
                         const vEl = document.getElementById('app-version');
                         vEl.textContent = data.version;
-                        if (data.update_available) {
-                            vEl.textContent += ' (update available)';
+                        vEl.style.color = '';
+                        if (data.update_available && data.latest_version) {
+                            vEl.textContent += ` (${data.latest_version} available)`;
                             vEl.style.color = '#ff9800';
                         }
                     }
@@ -513,7 +518,7 @@ async def get_dashboard():
             }
 
             async function triggerUpdate() {
-                if (!confirm('Update from GitHub? Service will restart after update.')) return;
+                if (!confirm('Update to latest version? Service will restart.')) return;
                 const btn = document.getElementById('update-btn');
                 const statusDiv = document.getElementById('update-status');
 
@@ -521,7 +526,11 @@ async def get_dashboard():
                 statusDiv.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Updating...</div>';
 
                 try {
-                    const resp = await fetch('/api/update', { method: 'POST' });
+                    const resp = await fetch('/api/update', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({})
+                    });
                     const result = await resp.json();
 
                     if (result.status === 'success') {
@@ -538,9 +547,55 @@ async def get_dashboard():
                 }
             }
 
+            async function switchVersion() {
+                const select = document.getElementById('version-select');
+                const version = select.value;
+                if (!version) return;
+                if (!confirm(`Switch to version ${version}? Service will restart.`)) return;
+
+                const statusDiv = document.getElementById('update-status');
+                statusDiv.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Switching version...</div>';
+
+                try {
+                    const resp = await fetch('/api/update', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({version: version})
+                    });
+                    const result = await resp.json();
+
+                    if (result.status === 'success') {
+                        statusDiv.innerHTML = `<div class="status-msg success">Switched to ${result.version}. Restarting...</div>`;
+                        setTimeout(() => { location.reload(); }, 5000);
+                    } else {
+                        statusDiv.innerHTML = `<div class="status-msg error">Switch failed: ${result.error || 'unknown'}</div>`;
+                    }
+                } catch (e) {
+                    statusDiv.innerHTML = `<div class="status-msg error">Switch error: ${e.message}</div>`;
+                }
+            }
+
+            async function loadVersions() {
+                try {
+                    const resp = await fetch('/api/versions');
+                    const data = await resp.json();
+                    const select = document.getElementById('version-select');
+                    if (data.versions && data.versions.length > 0) {
+                        select.innerHTML = data.versions.map(v =>
+                            `<option value="${v}"${v === data.current ? ' selected' : ''}>${v}${v === data.current ? ' (current)' : ''}</option>`
+                        ).join('');
+                    } else {
+                        select.innerHTML = '<option value="">No versions</option>';
+                    }
+                } catch (e) {
+                    console.error('Failed to load versions:', e);
+                }
+            }
+
             // Load data on page load and refresh every 30s
             loadStatus();
             loadDevices();
+            loadVersions();
             setInterval(loadStatus, 30000);
             setInterval(loadDevices, 30000);
         </script>
@@ -564,8 +619,9 @@ async def get_status():
             "auto_restart": is_auto_restart_enabled(),
             "sync_times": config.sync_times,
             "jobs": scheduler.get_jobs(),
-            "version": update_info.get("current") or update_info.get("version", "-"),
+            "version": get_current_version(),
             "update_available": update_info.get("status") == "update_available",
+            "latest_version": update_info.get("latest", ""),
         }
     except Exception as e:
         logger.error(f"Failed to get status: {e}")
@@ -829,11 +885,23 @@ async def check_update():
     return check_for_updates()
 
 
+@app.get("/api/versions")
+async def list_versions():
+    """List all available version tags."""
+    versions = get_available_versions()
+    current = get_current_version()
+    return {"current": current, "versions": versions}
+
+
+class UpdateRequest(BaseModel):
+    version: str | None = None
+
+
 @app.post("/api/update")
-async def do_update():
-    """Pull latest code from GitHub and restart."""
+async def do_update(req: UpdateRequest = UpdateRequest()):
+    """Update to a specific version or latest."""
     try:
-        result = perform_update()
+        result = perform_update(version=req.version)
         return result
     except Exception as e:
         logger.error(f"Update failed: {e}")

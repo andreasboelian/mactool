@@ -1,4 +1,4 @@
-"""Self-update from GitHub repository."""
+"""Self-update from GitHub repository with tag-based versioning."""
 
 import logging
 import os
@@ -10,85 +10,90 @@ from config import get_config
 
 logger = logging.getLogger(__name__)
 
-# Files to update (only Python scripts, never config.json)
-UPDATE_FILES = [
-    "api.py",
-    "bot_manager.py",
-    "config.py",
-    "device_monitor.py",
-    "diagnose_columns.py",
-    "main.py",
-    "scheduler.py",
-    "sync.py",
-    "test_sync.py",
-    "updater.py",
-    "requirements.txt",
-    "install.sh",
-]
-
 APP_DIR = Path(__file__).parent
 
 
+def _git(args: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
+    """Run a git command in APP_DIR."""
+    return subprocess.run(
+        ["git"] + args,
+        cwd=APP_DIR,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def get_current_version() -> str:
+    """Get current version from git tags.
+
+    Returns tag name (e.g. 'v1.0.100') or SHA fallback.
+    """
+    try:
+        # Exact tag on HEAD
+        result = _git(["describe", "--tags", "--exact-match", "HEAD"])
+        if result.returncode == 0:
+            return result.stdout.strip()
+
+        # Nearest tag + distance
+        result = _git(["describe", "--tags"])
+        if result.returncode == 0:
+            return result.stdout.strip()
+
+        # Fallback: short SHA
+        result = _git(["rev-parse", "--short", "HEAD"])
+        return result.stdout.strip() if result.returncode == 0 else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def get_available_versions() -> list[str]:
+    """Get all available version tags from remote, sorted newest first."""
+    try:
+        _git(["fetch", "origin", "--tags"], timeout=15)
+        result = _git(["tag", "--list", "v*", "--sort=-version:refname"])
+        if result.returncode == 0 and result.stdout.strip():
+            return [t.strip() for t in result.stdout.strip().split("\n") if t.strip()]
+        return []
+    except Exception as e:
+        logger.error(f"Failed to get versions: {e}")
+        return []
+
+
 def check_for_updates() -> dict:
-    """Check if updates are available by comparing local and remote commits."""
+    """Check if a newer version tag is available."""
     config = get_config()
     if not config.github_repo:
         return {"status": "error", "error": "github_repo not configured"}
 
     try:
-        # Check if git is available in APP_DIR
         git_dir = APP_DIR / ".git"
         if not git_dir.exists():
+            return {"status": "not_initialized", "message": "Git not initialized"}
+
+        # Fetch tags and branches
+        _git(["fetch", "origin", "--tags"], timeout=15)
+
+        current = get_current_version()
+        versions = get_available_versions()
+
+        if not versions:
+            return {"status": "up_to_date", "version": current}
+
+        latest = versions[0]
+
+        if current == latest:
             return {
-                "status": "not_initialized",
-                "message": "Run initial setup first: git clone into app directory",
+                "status": "up_to_date",
+                "version": current,
+                "versions": versions,
             }
-
-        # Fetch remote
-        subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=APP_DIR,
-            capture_output=True,
-            timeout=15,
-        )
-
-        # Compare local vs remote
-        local = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=APP_DIR,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        remote = subprocess.run(
-            ["git", "rev-parse", "origin/main"],
-            cwd=APP_DIR,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-
-        local_sha = local.stdout.strip()[:8]
-        remote_sha = remote.stdout.strip()[:8]
-
-        if local_sha == remote_sha:
-            return {"status": "up_to_date", "version": local_sha}
-
-        # Count commits behind
-        behind = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD..origin/main"],
-            cwd=APP_DIR,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        count = behind.stdout.strip()
 
         return {
             "status": "update_available",
-            "current": local_sha,
-            "latest": remote_sha,
-            "commits_behind": int(count) if count.isdigit() else 0,
+            "current": current,
+            "latest": latest,
+            "versions": versions,
         }
 
     except Exception as e:
@@ -96,8 +101,12 @@ def check_for_updates() -> dict:
         return {"status": "error", "error": str(e)}
 
 
-def perform_update() -> dict:
-    """Pull latest code from GitHub and restart the service."""
+def perform_update(version: str | None = None) -> dict:
+    """Update to a specific version tag (or latest if None).
+
+    Args:
+        version: Tag name like 'v1.0.101'. None = latest tag.
+    """
     config = get_config()
     if not config.github_repo:
         return {"status": "error", "error": "github_repo not configured"}
@@ -106,60 +115,39 @@ def perform_update() -> dict:
 
     try:
         if not git_dir.exists():
-            # First time: clone the repo
-            logger.info(f"Cloning {config.github_repo} into {APP_DIR}...")
-            result = subprocess.run(
-                [
-                    "git", "clone",
-                    f"https://github.com/{config.github_repo}.git",
-                    "--branch", "main",
-                    "--single-branch",
-                    ".",
-                ],
-                cwd=APP_DIR,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode != 0:
-                # If dir not empty, init and pull instead
-                subprocess.run(["git", "init"], cwd=APP_DIR, capture_output=True, timeout=10)
-                subprocess.run(
-                    ["git", "remote", "add", "origin",
-                     f"https://github.com/{config.github_repo}.git"],
-                    cwd=APP_DIR, capture_output=True, timeout=10,
-                )
-                subprocess.run(
-                    ["git", "fetch", "origin"],
-                    cwd=APP_DIR, capture_output=True, timeout=30,
-                )
-                subprocess.run(
-                    ["git", "reset", "--hard", "origin/main"],
-                    cwd=APP_DIR, capture_output=True, timeout=15,
-                )
-            action = "cloned"
+            # First time: init and fetch
+            logger.info(f"Initializing git for {config.github_repo}...")
+            _git(["init"])
+            _git(["remote", "add", "origin", f"https://github.com/{config.github_repo}.git"])
+            _git(["fetch", "origin", "--tags"], timeout=30)
         else:
-            # Pull latest changes (force-reset to remote, keeps config.json safe via .gitignore)
-            subprocess.run(
-                ["git", "fetch", "origin"],
-                cwd=APP_DIR, capture_output=True, timeout=30,
-            )
-            result = subprocess.run(
-                ["git", "reset", "--hard", "origin/main"],
-                cwd=APP_DIR, capture_output=True, text=True, timeout=15,
-            )
+            _git(["fetch", "origin", "--tags"], timeout=30)
+
+        # Determine target version
+        if version:
+            target = version
+        else:
+            versions = get_available_versions()
+            if not versions:
+                # No tags yet — fall back to origin/main
+                target = None
+            else:
+                target = versions[0]
+
+        if target:
+            # Checkout specific tag (detached HEAD is fine for deployment)
+            result = _git(["checkout", target, "--force"])
+            if result.returncode != 0:
+                return {"status": "error", "error": f"git checkout {target} failed: {result.stderr}"}
+            logger.info(f"Checked out version {target}")
+        else:
+            # Fallback: no tags, use origin/main
+            result = _git(["reset", "--hard", "origin/main"])
             if result.returncode != 0:
                 return {"status": "error", "error": f"git reset failed: {result.stderr}"}
-            action = "updated"
+            target = get_current_version()
 
-        # Get current version
-        version_result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=APP_DIR, capture_output=True, text=True, timeout=5,
-        )
-        version = version_result.stdout.strip() if version_result.returncode == 0 else "unknown"
-
-        # Install any new dependencies
+        # Install dependencies
         venv_pip = APP_DIR / "venv" / "bin" / "pip"
         req_file = APP_DIR / "requirements.txt"
         if venv_pip.exists() and req_file.exists():
@@ -168,16 +156,15 @@ def perform_update() -> dict:
                 cwd=APP_DIR, capture_output=True, timeout=120,
             )
 
-        logger.info(f"Update complete: {action}, version {version}")
+        logger.info(f"Update complete: version {target}")
 
-        # Schedule service restart (non-blocking)
+        # Schedule service restart
         _schedule_restart()
 
         return {
             "status": "success",
-            "action": action,
-            "version": version,
-            "message": "Update applied. Service restarting...",
+            "version": target,
+            "message": f"Updated to {target}. Service restarting...",
         }
 
     except Exception as e:
@@ -186,13 +173,7 @@ def perform_update() -> dict:
 
 
 def _schedule_restart():
-    """Restart by exiting the process — launchd (KeepAlive=true) restarts it.
-
-    No unload/load needed. launchctl unload kills the entire process tree
-    including any child shells, so the old approach never worked. Since the
-    LaunchAgent plist has KeepAlive=true, launchd will automatically restart
-    the process after it exits.
-    """
+    """Restart by exiting the process — launchd (KeepAlive=true) restarts it."""
     import threading
 
     def _do_exit():
