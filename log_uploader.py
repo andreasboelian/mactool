@@ -1,6 +1,7 @@
 """Upload bot log files to Supabase Storage bucket."""
 
 import re
+import sqlite3
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -67,8 +68,34 @@ def _parse_log_timestamp(file_path: Path) -> tuple[str, str] | None:
 
 
 def _build_upload_path(server_name: str, username: str, date_str: str, time_str: str) -> str:
-    """Build the storage path: server_name/YYYY-MM-DD_HHMM_username.log"""
-    return f"{server_name}/{date_str}_{time_str}_{username}.log"
+    """Build the storage path: server_name/YYYY-MM-DD_HHMM_username.log (all lowercase)."""
+    return f"{server_name}/{date_str}_{time_str}_{username}.log".lower()
+
+
+def _get_allowed_usernames(db_path: Path) -> set[str]:
+    """Get usernames of profiles on devices with 'Phone' in customName.
+
+    Joins profile.config__device = device.id, filters device.customName LIKE '%phone%'.
+    Returns a set of lowercase usernames.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT LOWER(p.config__username)
+            FROM profile p
+            JOIN device d ON p.config__device = d.id
+            WHERE LOWER(d.customName) LIKE '%phone%'
+              AND p.config__username IS NOT NULL
+              AND p.config__username != ''
+        """)
+        usernames = {row[0] for row in cursor.fetchall()}
+        conn.close()
+        logger.info(f"Allowed usernames (devices with 'Phone'): {len(usernames)}")
+        return usernames
+    except Exception as e:
+        logger.error(f"Failed to query allowed usernames: {e}")
+        return set()
 
 
 def _discover_log_files(db_parent_dir: Path) -> list[Path]:
@@ -134,17 +161,24 @@ def _cleanup_old_logs(client: Client, server_name: str, retention_days: int = RE
         return 0
 
 
-def upload_bot_logs(sb_client: Client, server_name: str, db_parent_dir: Path) -> dict:
-    """Upload all bot log files to Supabase Storage and clean up old files.
+def upload_bot_logs(sb_client: Client, server_name: str, db_parent_dir: Path, db_path: Path) -> dict:
+    """Upload bot log files to Supabase Storage and clean up old files.
 
-    Returns: {"status", "uploaded", "failed", "cleaned"}
+    Only uploads logs for accounts on devices with 'Phone' in customName.
+    Returns: {"status", "uploaded", "failed", "skipped", "cleaned"}
     """
-    result = {"status": "success", "uploaded": 0, "failed": 0, "cleaned": 0}
+    result = {"status": "success", "uploaded": 0, "failed": 0, "skipped": 0, "cleaned": 0}
 
     # Ensure bucket exists
     if not _ensure_bucket(sb_client):
         result["status"] = "error"
         result["error"] = "Failed to create/verify storage bucket"
+        return result
+
+    # Get allowed usernames (profiles on 'Phone' devices)
+    allowed = _get_allowed_usernames(db_path)
+    if not allowed:
+        logger.info("No allowed usernames found (no 'Phone' devices)")
         return result
 
     # Discover log files
@@ -153,9 +187,13 @@ def upload_bot_logs(sb_client: Client, server_name: str, db_parent_dir: Path) ->
         logger.info("No log files to upload")
         return result
 
-    # Upload each log file
+    # Upload each log file (only for allowed usernames)
     for log_file in log_files:
-        username = log_file.stem  # e.g. "andreasboelian" from "andreasboelian.log"
+        username = log_file.stem.lower()
+
+        if username not in allowed:
+            result["skipped"] += 1
+            continue
 
         ts = _parse_log_timestamp(log_file)
         if not ts:

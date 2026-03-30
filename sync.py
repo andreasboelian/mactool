@@ -526,7 +526,7 @@ class SyncManager:
             # Upload bot logs to Supabase Storage
             try:
                 log_result = upload_bot_logs(
-                    self.sb_client, self.server_prefix, self.db_path.parent
+                    self.sb_client, self.server_prefix, self.db_path.parent, temp_db_path
                 )
                 sync_result["log_upload"] = log_result
                 if log_result.get("status") == "error":
