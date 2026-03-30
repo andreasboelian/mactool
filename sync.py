@@ -11,6 +11,7 @@ import time
 
 from supabase import create_client, Client
 from config import get_config
+from log_uploader import upload_bot_logs
 
 logger = logging.getLogger(__name__)
 
@@ -521,6 +522,26 @@ class SyncManager:
                     sync_result["status"] = "partial_error"
 
             db_conn.close()
+
+            # Upload bot logs to Supabase Storage
+            try:
+                log_result = upload_bot_logs(
+                    self.sb_client, self.server_prefix, self.db_path.parent
+                )
+                sync_result["log_upload"] = log_result
+                if log_result.get("status") == "error":
+                    logger.warning(f"Log upload had errors: {log_result}")
+                else:
+                    logger.info(
+                        f"Log upload: {log_result.get('uploaded', 0)} uploaded, "
+                        f"{log_result.get('cleaned', 0)} cleaned"
+                    )
+            except Exception as e:
+                logger.error(f"Log upload failed (non-fatal): {e}")
+                sync_result["log_upload"] = {
+                    "status": "error",
+                    "error": str(e)[:500],
+                }
 
             # Summary
             if self._skipped_columns:
