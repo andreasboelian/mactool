@@ -72,26 +72,59 @@ def _build_upload_path(server_name: str, username: str, date_str: str, time_str:
     return f"{server_name}/{date_str}_{time_str}_{username}.log".lower()
 
 
-def _get_allowed_usernames(db_path: Path) -> set[str]:
-    """Get usernames of profiles on devices with 'Phone' in customName.
+def _get_previous_timeslot() -> str:
+    """Get the 2-hour timeslot directly before the current time.
 
-    Joins profile.config__device = device.id, filters device.customName LIKE '%phone%'.
+    Timeslots are: 00:00-01:59, 02:00-03:59, ..., 22:00-23:59.
+    If current time is 12:10, returns "10:00-11:59".
+    If current time is 01:30, returns "00:00-01:59".
+    If current time is 00:15, returns "22:00-23:59" (previous day's last slot).
+    """
+    now = datetime.now()
+    current_slot_start = (now.hour // 2) * 2
+    prev_slot_start = (current_slot_start - 2) % 24
+    prev_slot_end = prev_slot_start + 1
+    return f"{prev_slot_start:02d}:00-{prev_slot_end:02d}:59"
+
+
+def _get_allowed_usernames(db_path: Path) -> set[str]:
+    """Get usernames that should have their logs uploaded.
+
+    Filters:
+    1. Device must have 'Phone' in customName
+    2. Profile's startup_time__time_slot must contain the previous 2h timeslot
+
     Returns a set of lowercase usernames.
     """
+    prev_slot = _get_previous_timeslot()
+    logger.info(f"Previous timeslot: {prev_slot}")
+
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT LOWER(p.config__username)
+            SELECT LOWER(p.config__username), p.[startup_time__time_slot]
             FROM profile p
             JOIN device d ON p.config__device = d.id
             WHERE LOWER(d.customName) LIKE '%phone%'
               AND p.config__username IS NOT NULL
               AND p.config__username != ''
+              AND p.[startup_time__time_slot] IS NOT NULL
+              AND p.[startup_time__time_slot] != ''
         """)
-        usernames = {row[0] for row in cursor.fetchall()}
+        rows = cursor.fetchall()
         conn.close()
-        logger.info(f"Allowed usernames (devices with 'Phone'): {len(usernames)}")
+
+        # Filter: only profiles whose time_slot contains the previous slot
+        usernames = set()
+        for username, time_slot in rows:
+            if prev_slot in time_slot:
+                usernames.add(username)
+
+        logger.info(
+            f"Allowed usernames for slot {prev_slot}: {len(usernames)} "
+            f"(of {len(rows)} Phone profiles with timeslots)"
+        )
         return usernames
     except Exception as e:
         logger.error(f"Failed to query allowed usernames: {e}")
