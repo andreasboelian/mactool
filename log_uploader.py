@@ -1,6 +1,7 @@
 """Upload bot log files to Supabase Storage bucket."""
 
 import re
+import time
 import sqlite3
 import logging
 from pathlib import Path
@@ -12,11 +13,22 @@ logger = logging.getLogger(__name__)
 
 BUCKET_NAME = "bot-logs"
 RETENTION_DAYS = 90
+UPLOAD_BATCH_SIZE = 10          # files per batch
+UPLOAD_DELAY_BETWEEN = 0.3      # seconds between individual uploads
+UPLOAD_DELAY_BETWEEN_BATCHES = 2  # seconds between batches
 LOG_TIMESTAMP_RE = re.compile(r"^\[(\d{2})/(\d{2})\s+(\d{2}):(\d{2}):\d{2}\]")
 
 
 def _ensure_bucket(client: Client) -> bool:
-    """Create the storage bucket if it doesn't exist."""
+    """Verify the storage bucket exists, creating it only if necessary."""
+    # First try a lightweight GET to check existence
+    try:
+        client.storage.get_bucket(BUCKET_NAME)
+        logger.debug(f"Bucket '{BUCKET_NAME}' exists")
+        return True
+    except Exception:
+        pass  # bucket may not exist yet, try creating
+
     try:
         client.storage.create_bucket(
             BUCKET_NAME, options={"public": False}
@@ -220,7 +232,8 @@ def upload_bot_logs(sb_client: Client, server_name: str, db_parent_dir: Path, db
         logger.info("No log files to upload")
         return result
 
-    # Upload each log file (only for allowed usernames)
+    # Build list of files to upload (only for allowed usernames)
+    to_upload = []
     for log_file in log_files:
         username = log_file.stem.lower()
 
@@ -235,11 +248,22 @@ def upload_bot_logs(sb_client: Client, server_name: str, db_parent_dir: Path, db
 
         date_str, time_str = ts
         storage_path = _build_upload_path(server_name, username, date_str, time_str)
+        to_upload.append((log_file, storage_path))
 
+    # Upload in batches with throttling to avoid overwhelming Supabase Storage
+    for i, (log_file, storage_path) in enumerate(to_upload):
         if _upload_log_file(sb_client, log_file, storage_path):
             result["uploaded"] += 1
         else:
             result["failed"] += 1
+
+        # Throttle: short pause between uploads, longer pause between batches
+        if i < len(to_upload) - 1:
+            if (i + 1) % UPLOAD_BATCH_SIZE == 0:
+                logger.debug(f"Batch pause after {i + 1}/{len(to_upload)} uploads")
+                time.sleep(UPLOAD_DELAY_BETWEEN_BATCHES)
+            else:
+                time.sleep(UPLOAD_DELAY_BETWEEN)
 
     # Cleanup old logs
     result["cleaned"] = _cleanup_old_logs(sb_client, server_name)
