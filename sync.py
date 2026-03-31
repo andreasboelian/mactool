@@ -441,6 +441,80 @@ class SyncManager:
                         )
                     time.sleep(wait_time)
 
+    # ── Bin Table Sync ───────────────────────────────────────────────
+
+    def _sync_bin_table(self, db_conn: sqlite3.Connection) -> dict:
+        """Sync the 'bin' table with only id, config__username, noneoption__email.
+
+        After upserting current records, removes stale rows from Supabase
+        that no longer exist in the local bin table for this mac prefix.
+        """
+        sb_table = "bin"
+        result = {"status": "success", "count": 0, "deleted_stale": 0}
+
+        # Query only the 3 columns from SQLite
+        try:
+            cursor = db_conn.cursor()
+            cursor.execute(
+                'SELECT "id", "config__username", "noneoption__email" FROM bin;'
+            )
+            rows = cursor.fetchall()
+        except Exception as e:
+            logger.warning(f"Could not query 'bin' table: {e}")
+            result["status"] = "no_table"
+            return result
+
+        if not rows:
+            logger.info("bin: No records to sync")
+            result["status"] = "no_data"
+            return result
+
+        # Build records with prefixed IDs
+        local_ids = set()
+        records = []
+        for row in rows:
+            raw_id, username, email = row
+            prefixed_id = f"{self.server_prefix}_{raw_id}"
+            local_ids.add(prefixed_id)
+            records.append({
+                "id": prefixed_id,
+                "config__username": self._sanitize_value(username),
+                "noneoption__email": self._sanitize_value(email),
+            })
+
+        logger.info(f"bin: {len(records)} records to sync")
+
+        # Upsert current records
+        self._batch_upsert(sb_table, records)
+        result["count"] = len(records)
+
+        # Cleanup: delete stale rows for this mac prefix
+        try:
+            prefix_pattern = f"{self.server_prefix}_%"
+            response = (
+                self.sb_client.table(sb_table)
+                .select("id")
+                .like("id", prefix_pattern)
+                .execute()
+            )
+            remote_ids = {r["id"] for r in response.data} if response.data else set()
+            stale_ids = remote_ids - local_ids
+
+            if stale_ids:
+                for stale_id in stale_ids:
+                    self.sb_client.table(sb_table).delete().eq(
+                        "id", stale_id
+                    ).execute()
+                result["deleted_stale"] = len(stale_ids)
+                logger.info(f"bin: Deleted {len(stale_ids)} stale records for {self.server_prefix}")
+            else:
+                logger.info(f"bin: No stale records to clean up")
+
+        except Exception as e:
+            logger.warning(f"bin: Stale record cleanup failed (non-fatal): {e}")
+
+        return result
+
     # ── Main Sync ─────────────────────────────────────────────────────
 
     def sync(self) -> dict:
@@ -520,6 +594,22 @@ class SyncManager:
                         "error": f"{type(e).__name__}: {str(e)[:500]}",
                     }
                     sync_result["status"] = "partial_error"
+
+            # Sync bin table (separate: only 3 columns + stale cleanup)
+            try:
+                logger.info("--- Syncing table: bin → bin ---")
+                bin_result = self._sync_bin_table(db_conn)
+                sync_result["tables"]["bin"] = bin_result
+                logger.info(
+                    f"  bin: {bin_result.get('count', 0)} records synced, "
+                    f"{bin_result.get('deleted_stale', 0)} stale deleted"
+                )
+            except Exception as e:
+                logger.error(f"bin sync failed (non-fatal): {e}")
+                sync_result["tables"]["bin"] = {
+                    "status": "error",
+                    "error": str(e)[:500],
+                }
 
             db_conn.close()
 
