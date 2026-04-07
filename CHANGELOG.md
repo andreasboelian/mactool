@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.0.107 — 2026-04-07
+- Log-Retention von 90 auf 3 Tage reduziert
+- Log-Cleanup läuft nur noch 1x pro Tag (nicht mehr bei jedem Sync)
+- Log-Upload Throttling verschärft (5er Batches, 0.5s/5s Pausen)
+- Rate-Limit Retry für einzelne Log-Uploads (1 Retry bei 429/503/Timeout)
+- "Sync Now" Button lädt ALLE Phone-Logs hoch (nicht nur den letzten Timeslot); Auto-Sync bleibt unverändert
+- device_monitor.py: Singleton Supabase-Client statt create_client() pro Aufruf
+- device_monitor.py: adb_status Updates gebatched (max. 2 Requests statt 1 pro Device)
+- sync.py: Bin-Table Stale-Cleanup batched via .in_() statt Loop
+
 ## v1.0.101 — 2026-03-25
 - Versionierung: Git-Tags statt SHA, CHANGELOG.md
 - Dashboard: Versionsanzeige mit Tag-Namen (z.B. v1.0.100)

@@ -501,10 +501,12 @@ class SyncManager:
             stale_ids = remote_ids - local_ids
 
             if stale_ids:
-                for stale_id in stale_ids:
-                    self.sb_client.table(sb_table).delete().eq(
-                        "id", stale_id
-                    ).execute()
+                # Batch delete in chunks to avoid one-request-per-id and huge URLs
+                stale_list = list(stale_ids)
+                chunk_size = 200
+                for i in range(0, len(stale_list), chunk_size):
+                    chunk = stale_list[i : i + chunk_size]
+                    self.sb_client.table(sb_table).delete().in_("id", chunk).execute()
                 result["deleted_stale"] = len(stale_ids)
                 logger.info(f"bin: Deleted {len(stale_ids)} stale records for {self.server_prefix}")
             else:
@@ -517,10 +519,17 @@ class SyncManager:
 
     # ── Main Sync ─────────────────────────────────────────────────────
 
-    def sync(self) -> dict:
-        """Execute full sync: SQLite → Supabase."""
+    def sync(self, upload_all_logs: bool = False) -> dict:
+        """Execute full sync: SQLite → Supabase.
+
+        upload_all_logs: if True (manual "Sync Now"), upload every Phone-device
+        log file, not just the previous 2h timeslot. Scheduled/auto syncs pass
+        False to keep burst size small.
+        """
         logger.info("=" * 60)
-        logger.info("Starting SQLite → Supabase sync...")
+        logger.info(
+            f"Starting SQLite → Supabase sync... (upload_all_logs={upload_all_logs})"
+        )
 
         # Reset per-sync caches
         self._supabase_columns = {}
@@ -616,7 +625,11 @@ class SyncManager:
             # Upload bot logs to Supabase Storage
             try:
                 log_result = upload_bot_logs(
-                    self.sb_client, self.server_prefix, self.db_path.parent, temp_db_path
+                    self.sb_client,
+                    self.server_prefix,
+                    self.db_path.parent,
+                    temp_db_path,
+                    upload_all=upload_all_logs,
                 )
                 sync_result["log_upload"] = log_result
                 if log_result.get("status") == "error":
@@ -679,11 +692,15 @@ def get_sync_manager() -> SyncManager:
     return _sync_manager
 
 
-def trigger_sync() -> dict:
-    """Trigger a sync operation."""
+def trigger_sync(upload_all_logs: bool = False) -> dict:
+    """Trigger a sync operation.
+
+    upload_all_logs: pass True for manual triggers (button / CLI) so that every
+    Phone log file is uploaded, not just the previous 2h timeslot.
+    """
     try:
         manager = get_sync_manager()
-        return manager.sync()
+        return manager.sync(upload_all_logs=upload_all_logs)
     except Exception as e:
         logger.error(f"Sync trigger failed: {e}")
         return {"status": "error", "error": str(e)}

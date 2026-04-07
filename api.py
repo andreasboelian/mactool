@@ -630,9 +630,13 @@ async def get_status():
 
 @app.post("/api/sync")
 async def sync_now():
-    """Trigger sync immediately."""
+    """Trigger sync immediately.
+
+    Manual trigger from the dashboard — uploads ALL Phone logs (upload_all_logs=True),
+    not just the previous 2h timeslot that auto-syncs use.
+    """
     try:
-        result = trigger_sync()
+        result = trigger_sync(upload_all_logs=True)
         return result
     except Exception as e:
         logger.error(f"Sync failed: {e}")

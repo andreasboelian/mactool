@@ -14,6 +14,8 @@ import shutil
 from pathlib import Path
 from typing import Dict
 
+from supabase import Client
+
 from config import get_config
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,30 @@ _STATE_FILE = Path(__file__).parent / "device_state.json"
 
 # In-memory state cache: serial → last_known_status
 _device_state_cache: Dict[str, str] = {}
+
+# Shared Supabase client (created once per process, reused across cycles)
+_sb_client: Client | None = None
+
+
+def _get_sb_client() -> Client | None:
+    """Return a lazily-initialized, process-wide Supabase client.
+
+    Reusing one client avoids spawning a fresh HTTPS session per call, which
+    previously made device monitoring hammer Supabase with ~27 new connections
+    per cycle (1 query + 1 reset check + 1 per device status update).
+    """
+    global _sb_client
+    if _sb_client is None:
+        config = get_config()
+        if not config.supabase_key:
+            return None
+        try:
+            from supabase import create_client
+            _sb_client = create_client(config.supabase_url, config.supabase_key)
+        except Exception as e:
+            logger.warning(f"Failed to create Supabase client: {e}")
+            return None
+    return _sb_client
 
 
 def _load_state_cache():
@@ -228,14 +254,12 @@ def get_devices_from_supabase() -> list[dict]:
     Filters by id prefix so each mac only sees its own devices.
     """
     try:
-        config = get_config()
-        if not config.supabase_key:
+        client = _get_sb_client()
+        if client is None:
             logger.warning("No Supabase key, falling back to local DB")
             return get_devices_from_local_db()
 
-        from supabase import create_client
-
-        client = create_client(config.supabase_url, config.supabase_key)
+        config = get_config()
 
         # Query the DEVICE table (1 row per device), filtered to this mac
         response = (
@@ -324,22 +348,32 @@ def get_devices_from_db() -> list[dict]:
 # ── Supabase Status ──────────────────────────────────────────────
 
 
-def _update_supabase_device_status(device_id: str, status: str):
-    """Update adb_status for a device directly in Supabase device table."""
+def _batch_update_supabase_status(online_ids: list[str], offline_ids: list[str]) -> None:
+    """Update adb_status for many devices in at most two batched requests.
+
+    Groups all devices by status and issues a single .in_(...).update(...) per
+    bucket, instead of one PATCH per device. This cuts per-cycle request
+    volume from ~N to at most 2.
+    """
+    client = _get_sb_client()
+    if client is None:
+        return
+
+    config = get_config()
+    prefix = config.server_name
+
+    def _prefix(device_id: str) -> str:
+        return device_id if device_id.startswith(f"{prefix}_") else f"{prefix}_{device_id}"
+
     try:
-        config = get_config()
-        if not config.supabase_key:
-            return
-        from supabase import create_client
-        client = create_client(config.supabase_url, config.supabase_key)
-        prefixed_id = (
-            f"{config.server_name}_{device_id}"
-            if not device_id.startswith(f"{config.server_name}_")
-            else device_id
-        )
-        client.table("device").update({"adb_status": status}).eq("id", prefixed_id).execute()
+        if online_ids:
+            ids = [_prefix(d) for d in online_ids]
+            client.table("device").update({"adb_status": "online"}).in_("id", ids).execute()
+        if offline_ids:
+            ids = [_prefix(d) for d in offline_ids]
+            client.table("device").update({"adb_status": "offline"}).in_("id", ids).execute()
     except Exception as e:
-        logger.debug(f"Failed to update adb_status for {device_id}: {e}")
+        logger.debug(f"Batched adb_status update failed: {e}")
 
 
 def _check_supabase_resets() -> set[str]:
@@ -348,11 +382,10 @@ def _check_supabase_resets() -> set[str]:
     Returns set of device serials that were externally reset.
     """
     try:
-        config = get_config()
-        if not config.supabase_key:
+        client = _get_sb_client()
+        if client is None:
             return set()
-        from supabase import create_client
-        client = create_client(config.supabase_url, config.supabase_key)
+        config = get_config()
         response = (
             client.table("device")
             .select("id, device__id")
@@ -478,6 +511,8 @@ def run_device_monitor_job():
 
         result = {"checked": 0, "online": 0, "offline": 0, "blacklisted": 0, "webhooks_sent": 0}
         newly_offline = []
+        online_ids: list[str] = []
+        offline_ids: list[str] = []
 
         for device in all_devices:
             serial = device["serial"]
@@ -518,8 +553,14 @@ def run_device_monitor_job():
                     # Already reported
                     _device_state_cache[serial] = {"status": "offline", "reported": True}
 
-            # Update status in Supabase
-            _update_supabase_device_status(device["id"], "online" if is_online else "offline")
+            # Collect for batched Supabase status update
+            if is_online:
+                online_ids.append(device["id"])
+            else:
+                offline_ids.append(device["id"])
+
+        # Batched adb_status update (at most 2 requests total)
+        _batch_update_supabase_status(online_ids, offline_ids)
 
         # Send ONE batched webhook for all newly offline devices
         if newly_offline:

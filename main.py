@@ -103,7 +103,8 @@ def main():
         if args.sync:
             logger.info("Running one-time sync...")
             from sync import trigger_sync
-            result = trigger_sync()
+            # CLI is a manual trigger like the Sync Now button → upload all logs
+            result = trigger_sync(upload_all_logs=True)
             logger.info(f"Sync result: {result}")
             return
 

@@ -4,6 +4,7 @@ config.json
 # Runtime state
 device_state.json
 bot_state.json
+log_cleanup_state.json
 
 # Python
 __pycache__/

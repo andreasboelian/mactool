@@ -1,5 +1,6 @@
 """Upload bot log files to Supabase Storage bucket."""
 
+import json
 import re
 import time
 import sqlite3
@@ -12,11 +13,37 @@ from supabase import Client
 logger = logging.getLogger(__name__)
 
 BUCKET_NAME = "bot-logs"
-RETENTION_DAYS = 90
-UPLOAD_BATCH_SIZE = 10          # files per batch
-UPLOAD_DELAY_BETWEEN = 0.3      # seconds between individual uploads
-UPLOAD_DELAY_BETWEEN_BATCHES = 2  # seconds between batches
+RETENTION_DAYS = 3
+UPLOAD_BATCH_SIZE = 5           # files per batch
+UPLOAD_DELAY_BETWEEN = 0.5      # seconds between individual uploads
+UPLOAD_DELAY_BETWEEN_BATCHES = 5  # seconds between batches
+RATE_LIMIT_RETRY_DELAY = 10     # seconds to wait before retrying after rate limit
 LOG_TIMESTAMP_RE = re.compile(r"^\[(\d{2})/(\d{2})\s+(\d{2}):(\d{2}):\d{2}\]")
+
+# Persists last cleanup date so we only clean up old logs once per day
+_CLEANUP_STATE_FILE = Path(__file__).parent / "log_cleanup_state.json"
+
+
+def _should_run_cleanup() -> bool:
+    """Return True if the daily cleanup has not yet run today."""
+    try:
+        if _CLEANUP_STATE_FILE.exists():
+            data = json.loads(_CLEANUP_STATE_FILE.read_text())
+            if data.get("last_cleanup") == datetime.now().strftime("%Y-%m-%d"):
+                return False
+    except Exception as e:
+        logger.debug(f"Cleanup state read failed: {e}")
+    return True
+
+
+def _mark_cleanup_done() -> None:
+    """Record that cleanup has run for today."""
+    try:
+        _CLEANUP_STATE_FILE.write_text(
+            json.dumps({"last_cleanup": datetime.now().strftime("%Y-%m-%d")})
+        )
+    except Exception as e:
+        logger.debug(f"Cleanup state write failed: {e}")
 
 
 def _ensure_bucket(client: Client) -> bool:
@@ -99,21 +126,44 @@ def _get_previous_timeslot() -> str:
     return f"{prev_slot_start:02d}:00-{prev_slot_end:02d}:59"
 
 
-def _get_allowed_usernames(db_path: Path) -> set[str]:
+def _get_allowed_usernames(db_path: Path, upload_all: bool = False) -> set[str]:
     """Get usernames that should have their logs uploaded.
 
     Filters:
     1. Device must have 'Phone' in customName
-    2. Profile's startup_time__time_slot must contain the previous 2h timeslot
+    2. When upload_all=False (auto-sync): profile's startup_time__time_slot
+       must contain the previous 2h timeslot.
+       When upload_all=True (manual "Sync Now"): all Phone usernames are
+       returned regardless of timeslot.
 
     Returns a set of lowercase usernames.
     """
-    prev_slot = _get_previous_timeslot()
-    logger.info(f"Previous timeslot: {prev_slot}")
+    if upload_all:
+        logger.info("upload_all=True — returning ALL Phone usernames (no timeslot filter)")
+    else:
+        prev_slot = _get_previous_timeslot()
+        logger.info(f"Previous timeslot: {prev_slot}")
 
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
+
+        if upload_all:
+            # No timeslot required — just Phone devices with usernames
+            cursor.execute("""
+                SELECT LOWER(p.config__username)
+                FROM profile p
+                JOIN device d ON p.config__device = d.id
+                WHERE LOWER(d.customName) LIKE '%phone%'
+                  AND p.config__username IS NOT NULL
+                  AND p.config__username != ''
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+            usernames = {row[0] for row in rows if row[0]}
+            logger.info(f"Allowed usernames (upload_all): {len(usernames)} Phone profiles")
+            return usernames
+
         cursor.execute("""
             SELECT LOWER(p.config__username), p.[startup_time__time_slot]
             FROM profile p
@@ -155,29 +205,63 @@ def _discover_log_files(db_parent_dir: Path) -> list[Path]:
     return log_files
 
 
+def _is_rate_limit_error(error: Exception) -> bool:
+    """Detect transient rate-limit / overload / timeout errors from Supabase Storage."""
+    msg = str(error).lower()
+    return (
+        "429" in msg
+        or "503" in msg
+        or "rate limit" in msg
+        or "too many" in msg
+        or "timeout" in msg
+        or "timed out" in msg
+    )
+
+
 def _upload_log_file(client: Client, file_path: Path, storage_path: str) -> bool:
-    """Upload a single log file to Supabase Storage."""
-    try:
-        content = file_path.read_bytes()
-        client.storage.from_(BUCKET_NAME).upload(
-            storage_path,
-            content,
-            file_options={"content-type": "text/plain", "x-upsert": "true"},
-        )
-        logger.info(f"Uploaded {file_path.name} → {storage_path}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to upload {file_path.name}: {e}")
-        return False
+    """Upload a single log file to Supabase Storage.
+
+    Retries once after a short delay if the error looks like a rate limit or
+    timeout, so a single hiccup doesn't fail a whole batch.
+    """
+    content = file_path.read_bytes()
+    for attempt in (1, 2):
+        try:
+            client.storage.from_(BUCKET_NAME).upload(
+                storage_path,
+                content,
+                file_options={"content-type": "text/plain", "x-upsert": "true"},
+            )
+            logger.info(f"Uploaded {file_path.name} → {storage_path}")
+            return True
+        except Exception as e:
+            if attempt == 1 and _is_rate_limit_error(e):
+                logger.warning(
+                    f"Rate-limited on {file_path.name}, retrying in {RATE_LIMIT_RETRY_DELAY}s: {e}"
+                )
+                time.sleep(RATE_LIMIT_RETRY_DELAY)
+                continue
+            logger.error(f"Failed to upload {file_path.name}: {e}")
+            return False
+    return False
 
 
 def _cleanup_old_logs(client: Client, server_name: str, retention_days: int = RETENTION_DAYS) -> int:
-    """Delete log files older than retention_days from the bucket."""
+    """Delete log files older than retention_days from the bucket.
+
+    Runs at most once per day (gated by _CLEANUP_STATE_FILE) to avoid listing
+    and deleting on every sync cycle.
+    """
+    if not _should_run_cleanup():
+        logger.debug("Log cleanup already ran today, skipping")
+        return 0
+
     try:
         files = client.storage.from_(BUCKET_NAME).list(
             server_name, options={"limit": 1000}
         )
         if not files:
+            _mark_cleanup_done()
             return 0
 
         cutoff = datetime.now() - timedelta(days=retention_days)
@@ -199,6 +283,7 @@ def _cleanup_old_logs(client: Client, server_name: str, retention_days: int = RE
             client.storage.from_(BUCKET_NAME).remove(to_delete)
             logger.info(f"Cleaned up {len(to_delete)} log files older than {retention_days} days")
 
+        _mark_cleanup_done()
         return len(to_delete)
 
     except Exception as e:
@@ -206,10 +291,19 @@ def _cleanup_old_logs(client: Client, server_name: str, retention_days: int = RE
         return 0
 
 
-def upload_bot_logs(sb_client: Client, server_name: str, db_parent_dir: Path, db_path: Path) -> dict:
+def upload_bot_logs(
+    sb_client: Client,
+    server_name: str,
+    db_parent_dir: Path,
+    db_path: Path,
+    upload_all: bool = False,
+) -> dict:
     """Upload bot log files to Supabase Storage and clean up old files.
 
     Only uploads logs for accounts on devices with 'Phone' in customName.
+    When upload_all=True, skips the previous-timeslot filter and uploads
+    logs for every Phone profile (use for manual "Sync Now" triggers).
+
     Returns: {"status", "uploaded", "failed", "skipped", "cleaned"}
     """
     result = {"status": "success", "uploaded": 0, "failed": 0, "skipped": 0, "cleaned": 0}
@@ -221,7 +315,7 @@ def upload_bot_logs(sb_client: Client, server_name: str, db_parent_dir: Path, db
         return result
 
     # Get allowed usernames (profiles on 'Phone' devices)
-    allowed = _get_allowed_usernames(db_path)
+    allowed = _get_allowed_usernames(db_path, upload_all=upload_all)
     if not allowed:
         logger.info("No allowed usernames found (no 'Phone' devices)")
         return result
