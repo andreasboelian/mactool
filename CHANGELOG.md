@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.108 — 2026-06-02
+- RustDesk-Watchdog: stellt sicher, dass RustDesk.app immer läuft; startet sie automatisch neu, wenn sie geschlossen wurde (Standard-Intervall: alle 5 Min)
+- Dashboard: RustDesk-Status (läuft/läuft nicht) + Watch-Status (aktiv/deaktiviert)
+- Dashboard-Buttons: "Start RustDesk" (startet sofort + aktiviert Watchdog) und "Disable RustDesk Watch" (deaktiviert nur den Watchdog, schließt RustDesk NICHT)
+- Watchdog wird beim Mactool-Start einmalig sofort ausgeführt
+- Neue Config-Felder: `rustdesk_app_path` (Default `/Applications/RustDesk.app`), `rustdesk_check_interval_minutes` (Default 5)
+
 ## v1.0.107 — 2026-04-07
 - Log-Retention von 90 auf 3 Tage reduziert
 - Log-Cleanup läuft nur noch 1x pro Tag (nicht mehr bei jedem Sync)

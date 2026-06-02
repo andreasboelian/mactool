@@ -23,11 +23,13 @@ class AppConfig:
     supabase_url: str = "https://fxreaveeihaawkusmybi.supabase.co"
     supabase_key: str = ""
     bot_app_path: str = "/Applications/botapp.app/Contents/MacOS/BotApp"
+    rustdesk_app_path: str = "/Applications/RustDesk.app"
     adb_path: str = "adb"
     sqlite_db_path: str = "~/Desktop/GramBotStorage/super.db"
     webhook_url: str = ""
     device_check_interval_hours: int = 1
     bot_check_interval_minutes: int = 5
+    rustdesk_check_interval_minutes: int = 5
     log_level: str = "INFO"
     github_repo: str = ""  # e.g. "username/mactool" — for self-update
 

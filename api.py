@@ -18,6 +18,12 @@ from device_monitor import (
     reset_all_reported,
 )
 from bot_manager import is_bot_running, start_bot, stop_bot, restart_bot, is_auto_restart_enabled
+from rustdesk_manager import (
+    is_rustdesk_running,
+    start_rustdesk,
+    is_watch_enabled as is_rustdesk_watch_enabled,
+    set_watch_enabled as set_rustdesk_watch_enabled,
+)
 from updater import check_for_updates, perform_update, get_current_version, get_available_versions
 from scheduler import get_scheduler
 
@@ -115,6 +121,14 @@ async def get_dashboard():
                         <span class="status-value" id="auto-restart-status">Loading...</span>
                     </div>
                     <div class="status">
+                        <span>RustDesk:</span>
+                        <span class="status-value" id="rustdesk-status">Loading...</span>
+                    </div>
+                    <div class="status">
+                        <span>RustDesk Watch:</span>
+                        <span class="status-value" id="rustdesk-watch-status">Loading...</span>
+                    </div>
+                    <div class="status">
                         <span>Scheduler:</span>
                         <span class="status-value" id="scheduler-status">Loading...</span>
                     </div>
@@ -122,6 +136,8 @@ async def get_dashboard():
                     <button class="btn" id="device-check-btn" onclick="triggerDeviceCheck()">Check Devices</button>
                     <button class="btn" id="bot-start-btn" onclick="botStart()" style="background:#4caf50;">Start Bot</button>
                     <button class="btn btn-danger" id="bot-stop-btn" onclick="botStop()">Stop Bot</button>
+                    <button class="btn" id="rustdesk-start-btn" onclick="rustdeskStart()" style="background:#4caf50;">Start RustDesk</button>
+                    <button class="btn btn-danger" id="rustdesk-stop-btn" onclick="rustdeskStop()">Disable RustDesk Watch</button>
                     <button class="btn" id="update-btn" onclick="triggerUpdate()" style="background:#ff9800;">Update to Latest</button>
                     <select id="version-select" style="padding:6px 10px;border-radius:4px;border:1px solid #ddd;font-size:13px;">
                         <option value="">Loading versions...</option>
@@ -130,6 +146,7 @@ async def get_dashboard():
                     <div id="sync-status"></div>
                     <div id="device-check-status"></div>
                     <div id="bot-status-msg"></div>
+                    <div id="rustdesk-status-msg"></div>
                     <div id="update-status"></div>
                 </div>
 
@@ -209,6 +226,20 @@ async def get_dashboard():
                     // Show/hide start/stop buttons based on state
                     document.getElementById('bot-start-btn').style.display = data.bot_running ? 'none' : '';
                     document.getElementById('bot-stop-btn').style.display = data.bot_running ? '' : 'none';
+
+                    // RustDesk status
+                    const rdEl = document.getElementById('rustdesk-status');
+                    rdEl.textContent = data.rustdesk_running ? '✓ Running' : '✗ Stopped';
+                    rdEl.style.color = data.rustdesk_running ? '#4caf50' : '#f44336';
+
+                    const rdWatchEl = document.getElementById('rustdesk-watch-status');
+                    rdWatchEl.textContent = data.rustdesk_watch ? '✓ Active' : '✗ Disabled';
+                    rdWatchEl.style.color = data.rustdesk_watch ? '#4caf50' : '#f44336';
+
+                    // Show "Start RustDesk" when not running OR watch is off; show
+                    // "Disable Watch" only while the watchdog is active.
+                    document.getElementById('rustdesk-start-btn').style.display = (data.rustdesk_running && data.rustdesk_watch) ? 'none' : '';
+                    document.getElementById('rustdesk-stop-btn').style.display = data.rustdesk_watch ? '' : 'none';
 
                     document.getElementById('scheduler-status').textContent = '✓ Running';
                     document.getElementById('server-name').textContent = data.server_name;
@@ -517,6 +548,43 @@ async def get_dashboard():
                 setTimeout(() => { msgDiv.innerHTML = ''; }, 10000);
             }
 
+            async function rustdeskStart() {
+                const msgDiv = document.getElementById('rustdesk-status-msg');
+                msgDiv.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Starting RustDesk...</div>';
+                try {
+                    const resp = await fetch('/api/rustdesk/start', { method: 'POST' });
+                    const result = await resp.json();
+                    if (result.running) {
+                        msgDiv.innerHTML = '<div class="status-msg success">RustDesk running. Watchdog active.</div>';
+                    } else {
+                        msgDiv.innerHTML = '<div class="status-msg error">RustDesk failed to start.</div>';
+                    }
+                    setTimeout(loadStatus, 1000);
+                } catch (e) {
+                    msgDiv.innerHTML = `<div class="status-msg error">Start failed: ${e.message}</div>`;
+                }
+                setTimeout(() => { msgDiv.innerHTML = ''; }, 10000);
+            }
+
+            async function rustdeskStop() {
+                if (!confirm('Disable the RustDesk watchdog? RustDesk will NOT be closed, but it will no longer be restarted automatically if it quits.')) return;
+                const msgDiv = document.getElementById('rustdesk-status-msg');
+                msgDiv.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Disabling watchdog...</div>';
+                try {
+                    const resp = await fetch('/api/rustdesk/stop', { method: 'POST' });
+                    const result = await resp.json();
+                    if (!result.watch) {
+                        msgDiv.innerHTML = '<div class="status-msg success">RustDesk watchdog disabled.</div>';
+                    } else {
+                        msgDiv.innerHTML = '<div class="status-msg error">Failed to disable watchdog.</div>';
+                    }
+                    setTimeout(loadStatus, 1000);
+                } catch (e) {
+                    msgDiv.innerHTML = `<div class="status-msg error">Disable failed: ${e.message}</div>`;
+                }
+                setTimeout(() => { msgDiv.innerHTML = ''; }, 10000);
+            }
+
             async function triggerUpdate() {
                 if (!confirm('Update to latest version? Service will restart.')) return;
                 const btn = document.getElementById('update-btn');
@@ -617,6 +685,8 @@ async def get_status():
             "server_name": config.server_name,
             "bot_running": is_bot_running(),
             "auto_restart": is_auto_restart_enabled(),
+            "rustdesk_running": is_rustdesk_running(),
+            "rustdesk_watch": is_rustdesk_watch_enabled(),
             "sync_times": config.sync_times,
             "jobs": scheduler.get_jobs(),
             "version": get_current_version(),
@@ -880,6 +950,38 @@ async def stop_bot_endpoint():
         }
     except Exception as e:
         logger.error(f"Bot stop failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rustdesk/start")
+async def start_rustdesk_endpoint():
+    """Enable the RustDesk watchdog and launch RustDesk now."""
+    import asyncio
+    try:
+        set_rustdesk_watch_enabled(True)
+        success = await asyncio.to_thread(start_rustdesk)
+        return {
+            "status": "success" if success else "failed",
+            "running": is_rustdesk_running(),
+            "watch": is_rustdesk_watch_enabled(),
+        }
+    except Exception as e:
+        logger.error(f"RustDesk start failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rustdesk/stop")
+async def stop_rustdesk_endpoint():
+    """Disable the RustDesk watchdog (does NOT kill a running RustDesk)."""
+    try:
+        set_rustdesk_watch_enabled(False)
+        return {
+            "status": "success",
+            "running": is_rustdesk_running(),
+            "watch": is_rustdesk_watch_enabled(),
+        }
+    except Exception as e:
+        logger.error(f"RustDesk watchdog disable failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

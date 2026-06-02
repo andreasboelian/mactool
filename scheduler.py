@@ -9,6 +9,7 @@ from config import get_config
 from sync import trigger_sync
 from device_monitor import run_device_monitor_job
 from bot_manager import run_bot_manager_job
+from rustdesk_manager import run_rustdesk_manager_job
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,25 @@ class SchedulerManager:
 
         logger.info("Bot manager job registered")
 
+    def _register_rustdesk_manager_job(self):
+        """Register RustDesk watchdog job (every N minutes)."""
+        config = get_config()
+        interval_minutes = config.rustdesk_check_interval_minutes
+
+        logger.info(f"Registering RustDesk watchdog job (every {interval_minutes} minutes)")
+
+        trigger = IntervalTrigger(minutes=interval_minutes)
+
+        job = self.scheduler.add_job(
+            run_rustdesk_manager_job,
+            trigger=trigger,
+            id="rustdesk_manager",
+            name=f"RustDesk watchdog (every {interval_minutes}m)",
+            replace_existing=True,
+        )
+
+        logger.info("RustDesk watchdog job registered")
+
     def register_jobs(self):
         """Register all scheduled jobs."""
         if self._jobs_registered:
@@ -97,6 +117,7 @@ class SchedulerManager:
         self._register_sync_jobs()
         self._register_device_monitor_job()
         self._register_bot_manager_job()
+        self._register_rustdesk_manager_job()
 
         self._jobs_registered = True
         logger.info("All jobs registered")

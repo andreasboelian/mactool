@@ -136,6 +136,12 @@ def main():
         result = run_bot_manager_job()
         logger.info(f"Bot check result: {result}")
 
+        # Run initial RustDesk check
+        logger.info("Running initial RustDesk watchdog check...")
+        from rustdesk_manager import run_rustdesk_manager_job
+        rd_result = run_rustdesk_manager_job()
+        logger.info(f"RustDesk check result: {rd_result}")
+
         # Start web UI if requested
         if args.web_ui:
             logger.info(f"Starting FastAPI web UI on http://localhost:{args.web_port}")
