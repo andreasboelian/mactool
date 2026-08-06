@@ -6,6 +6,7 @@ device_state.json
 bot_state.json
 rustdesk_state.json
 log_cleanup_state.json
+run_state.json
 
 # Python
 __pycache__/

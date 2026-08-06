@@ -81,6 +81,16 @@ def main():
     parser.add_argument("--sync", action="store_true", help="Run sync once and exit")
     parser.add_argument("--check-devices", action="store_true", help="Check devices once and exit")
     parser.add_argument("--bot-restart", action="store_true", help="Restart bot and exit")
+    parser.add_argument(
+        "--customer-stats",
+        action="store_true",
+        help="Run the customer statistics upload once and exit",
+    )
+    parser.add_argument(
+        "--customer-stats-preview",
+        action="store_true",
+        help="Collect and map customer statistics without uploading, then exit",
+    )
 
     args = parser.parse_args()
 
@@ -120,6 +130,31 @@ def main():
             from bot_manager import restart_bot
             success = restart_bot()
             logger.info(f"Bot restart: {'success' if success else 'failed'}")
+            return
+
+        if args.customer_stats or args.customer_stats_preview:
+            from customer_stats import run_customer_stats_upload
+
+            dry_run = args.customer_stats_preview
+            logger.info(
+                "Collecting customer statistics (preview)..."
+                if dry_run
+                else "Running customer statistics upload..."
+            )
+            result = run_customer_stats_upload(
+                trigger="preview" if dry_run else "manual", dry_run=dry_run
+            )
+            if dry_run:
+                import json
+
+                logger.info(
+                    f"Preview: {result.get('accounts')} accounts, "
+                    f"{result.get('sessions')} sessions, "
+                    f"{result.get('missing_sessions')} missing entries"
+                )
+                print(json.dumps(result.get("preview", {}), indent=2, default=str))
+            else:
+                logger.info(f"Customer statistics result: {result}")
             return
 
         # Setup signal handlers for graceful shutdown

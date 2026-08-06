@@ -7,6 +7,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from config import get_config
 from sync import trigger_sync
+from customer_stats import run_customer_stats_upload
 from device_monitor import run_device_monitor_job
 from bot_manager import run_bot_manager_job
 from rustdesk_manager import run_rustdesk_manager_job
@@ -17,6 +18,34 @@ logger = logging.getLogger(__name__)
 _scheduler: BackgroundScheduler | None = None
 
 
+def run_scheduled_uploads() -> dict:
+    """Run both statistics uploads, one after the other.
+
+    Sequential on purpose: running them in parallel would hit two Supabase
+    projects with large batches at the same time, which is exactly what made the
+    old standalone script time out.
+    """
+    results = {}
+
+    try:
+        results["dashboard"] = trigger_sync()
+    except Exception as e:
+        logger.error(f"Statistik (Dashboard) fehlgeschlagen: {e}", exc_info=True)
+        results["dashboard"] = {"status": "error", "error": str(e)}
+
+    try:
+        if get_config().customer_stats_enabled:
+            results["customer"] = run_customer_stats_upload(trigger="auto")
+        else:
+            logger.info("Statistik (Kunde) ist ausgeschaltet — übersprungen")
+            results["customer"] = {"status": "disabled"}
+    except Exception as e:
+        logger.error(f"Statistik (Kunde) fehlgeschlagen: {e}", exc_info=True)
+        results["customer"] = {"status": "error", "error": str(e)}
+
+    return results
+
+
 class SchedulerManager:
     """Manages scheduled jobs."""
 
@@ -25,11 +54,11 @@ class SchedulerManager:
         self._jobs_registered = False
 
     def _register_sync_jobs(self):
-        """Register sync jobs based on config."""
+        """Register the statistics upload jobs based on config."""
         config = get_config()
         sync_times = config.sync_times
 
-        logger.info(f"Registering sync jobs for times: {sync_times}")
+        logger.info(f"Registering statistics upload jobs for times: {sync_times}")
 
         for time_str in sync_times:
             try:
@@ -39,14 +68,14 @@ class SchedulerManager:
                 trigger = CronTrigger(hour=hour, minute=minute)
 
                 job = self.scheduler.add_job(
-                    trigger_sync,
+                    run_scheduled_uploads,
                     trigger=trigger,
                     id=f"sync_{hour}_{minute}",
-                    name=f"Sync at {time_str}",
+                    name=f"Statistik-Upload at {time_str}",
                     replace_existing=True,
                 )
 
-                logger.info(f"Registered sync job at {time_str}")
+                logger.info(f"Registered statistics upload job at {time_str}")
 
             except Exception as e:
                 logger.error(f"Failed to register sync job for {time_str}: {e}")

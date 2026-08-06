@@ -13,5 +13,22 @@
   "bot_check_interval_minutes": 5,
   "rustdesk_check_interval_minutes": 5,
   "log_level": "INFO",
-  "github_repo": "your-username/mactool"
+  "github_repo": "your-username/mactool",
+
+  "dashboard_stats_enabled": true,
+  "dashboard_table_device": "device",
+  "dashboard_table_profile": "profile",
+  "dashboard_table_stats": "stats",
+  "dashboard_table_bin": "bin",
+
+  "customer_stats_enabled": false,
+  "customer_stats_source": "sessions",
+  "customer_stats_session_limit": 90,
+  "customer_stats_url": "https://eeshaewrbrqipsvtlyng.supabase.co",
+  "customer_stats_key": "",
+  "customer_stats_table": "statistik",
+  "customer_users_url": "https://apltfvenhqwnidmuptdp.supabase.co",
+  "customer_users_key": "",
+  "customer_users_table": "users",
+  "auto_disable_legacy_upload": true
 }

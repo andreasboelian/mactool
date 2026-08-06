@@ -7,7 +7,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from config import get_config, reload_config
-from sync import trigger_sync
+from sync import trigger_sync, check_dashboard_target
+from customer_stats import (
+    run_customer_stats_upload,
+    check_customer_target,
+    SUPERDB_UNAVAILABLE_FIELDS,
+)
+import legacy_upload
+import run_state
 from device_monitor import (
     get_adb_devices,
     get_devices_from_db,
@@ -43,11 +50,37 @@ app.add_middleware(
 
 # Pydantic models
 class ConfigUpdate(BaseModel):
-    """Configuration update model."""
+    """Configuration update model.
+
+    Key fields follow the convention: omitted/empty = keep the stored key,
+    "-" = clear it. That way the dashboard can show a masked key without ever
+    sending the real one back and forth.
+    """
 
     server_name: str | None = None
     sync_times: list[str] | None = None
     blacklist: list[str] | None = None
+
+    # Statistik (Dashboard)
+    dashboard_stats_enabled: bool | None = None
+    supabase_url: str | None = None
+    supabase_key: str | None = None
+    dashboard_table_device: str | None = None
+    dashboard_table_profile: str | None = None
+    dashboard_table_stats: str | None = None
+    dashboard_table_bin: str | None = None
+
+    # Statistik (Kunde)
+    customer_stats_enabled: bool | None = None
+    customer_stats_source: str | None = None
+    customer_stats_session_limit: int | None = None
+    customer_stats_url: str | None = None
+    customer_stats_key: str | None = None
+    customer_stats_table: str | None = None
+    customer_users_url: str | None = None
+    customer_users_key: str | None = None
+    customer_users_table: str | None = None
+    auto_disable_legacy_upload: bool | None = None
 
 
 class DeviceAction(BaseModel):
@@ -60,6 +93,44 @@ class BlacklistAction(BaseModel):
     """Blacklist action model."""
 
     device_id: str
+
+
+class TargetRequest(BaseModel):
+    """Which upload target to test."""
+
+    target: str
+
+
+class AgentRequest(BaseModel):
+    """Path of a legacy upload LaunchAgent."""
+
+    path: str
+
+
+MASK_CHAR = "•"
+
+
+def _mask_key(value: str) -> str:
+    """Show only the last 4 characters of a key."""
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return MASK_CHAR * 8
+    return MASK_CHAR * 8 + value[-4:]
+
+
+def _apply_key(current: str, submitted: str | None) -> str:
+    """Resolve a submitted key against the stored one."""
+    if submitted is None:
+        return current
+    submitted = submitted.strip()
+    if not submitted:
+        return current  # nothing typed → unchanged
+    if submitted.startswith(MASK_CHAR):
+        return current  # masked placeholder sent back → unchanged
+    if submitted == "-":
+        return ""  # explicit clear
+    return submitted
 
 
 # Routes
@@ -103,6 +174,19 @@ async def get_dashboard():
             @keyframes spin { to { transform: rotate(360deg); } }
             .sync-times-edit { margin-top: 10px; }
             .sync-times-edit input { padding: 8px; font-size: 14px; margin-right: 5px; border: 1px solid #ddd; border-radius: 4px; width: 80%; }
+            .stats-block { border: 1px solid #e5e5e5; border-radius: 6px; padding: 15px; margin-bottom: 15px; }
+            .stats-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 15px; }
+            .stats-head strong { font-size: 15px; }
+            .hint { font-size: 12px; color: #666; margin-top: 4px; }
+            .hint.warn { color: #8a5a00; background: #fff8e6; border: 1px solid #ffe0a3; padding: 10px; border-radius: 4px; margin-top: 10px; }
+            .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin: 12px 0 4px; }
+            .fields label { display: block; font-size: 12px; color: #555; }
+            .fields input, .fields select { width: 100%; padding: 7px; margin-top: 3px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+            .switch { display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; cursor: pointer; }
+            .switch input { width: 16px; height: 16px; cursor: pointer; }
+            .row-actions { margin-top: 6px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+            .last-run { font-size: 12px; color: #666; margin-left: 6px; }
+            .code { background: #f6f6f6; border: 1px solid #e0e0e0; border-radius: 4px; padding: 10px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; white-space: pre-wrap; margin-top: 8px; max-height: 260px; overflow: auto; }
         </style>
     </head>
     <body>
@@ -127,6 +211,14 @@ async def get_dashboard():
                     <div class="status">
                         <span>RustDesk Watch:</span>
                         <span class="status-value" id="rustdesk-watch-status">Loading...</span>
+                    </div>
+                    <div class="status">
+                        <span>Statistik (Dashboard):</span>
+                        <span class="status-value" id="dash-stats-status">Loading...</span>
+                    </div>
+                    <div class="status">
+                        <span>Statistik (Kunde):</span>
+                        <span class="status-value" id="cust-stats-status">Loading...</span>
                     </div>
                     <div class="status">
                         <span>Scheduler:</span>
@@ -177,6 +269,93 @@ async def get_dashboard():
                     <h2>Job Schedule</h2>
                     <div id="jobs-list" style="font-size: 12px;">Loading...</div>
                 </div>
+            </div>
+
+            <div class="card" style="margin-bottom:30px;">
+                <h2>Statistik-Uploads</h2>
+
+                <div class="stats-block">
+                    <div class="stats-head">
+                        <div>
+                            <strong>Statistik (Dashboard)</strong>
+                            <div class="hint">Sessiondaten aus der super.db in die EBM-Supabase. Der Schalter betrifft nur die stats-Tabelle — device, profile, bin und die Bot-Logs laufen unabhängig weiter.</div>
+                        </div>
+                        <label class="switch"><input type="checkbox" id="dash-enabled"> aktiv</label>
+                    </div>
+                    <div class="fields">
+                        <label>Supabase URL<input type="text" id="dash-url" placeholder="https://xxx.supabase.co"></label>
+                        <label>Key<input type="text" id="dash-key" placeholder="kein Key gespeichert"></label>
+                        <label>Tabelle device<input type="text" id="dash-t-device"></label>
+                        <label>Tabelle profile<input type="text" id="dash-t-profile"></label>
+                        <label>Tabelle stats<input type="text" id="dash-t-stats"></label>
+                        <label>Tabelle bin<input type="text" id="dash-t-bin"></label>
+                    </div>
+                    <div class="row-actions">
+                        <button class="btn btn-small" onclick="testTarget('dashboard', 'dash-test')">Verbindung testen</button>
+                        <button class="btn btn-small" style="background:#4caf50;" onclick="runStats('dashboard')">Jetzt hochladen</button>
+                        <span class="last-run" id="dash-last-run"></span>
+                    </div>
+                    <div id="dash-test"></div>
+                </div>
+
+                <div class="stats-block">
+                    <div class="stats-head">
+                        <div>
+                            <strong>Statistik (Kunde)</strong>
+                            <div class="hint">Ersetzt das alte upload-macXX.py. Ziel A schreibt die Rohdaten (Upsert auf session_id), Ziel B die verschönerten Zahlen inkl. Missing-Session-Einträgen. Leere URL oder leerer Key = Ziel wird übersprungen.</div>
+                        </div>
+                        <label class="switch"><input type="checkbox" id="cust-enabled"> aktiv</label>
+                    </div>
+                    <div class="fields">
+                        <label>Datenquelle
+                            <select id="cust-source" onchange="updateSourceHint()">
+                                <option value="sessions">sessions.json (wie bisher)</option>
+                                <option value="superdb">super.db des Macs</option>
+                            </select>
+                        </label>
+                        <label>Sessions je Account<input type="number" id="cust-limit" min="1"></label>
+                    </div>
+                    <div class="hint warn" id="cust-source-hint" style="display:none;"></div>
+
+                    <div class="fields">
+                        <label>Ziel A — Supabase URL<input type="text" id="cust-stats-url" placeholder="https://xxx.supabase.co"></label>
+                        <label>Ziel A — Key<input type="text" id="cust-stats-key" placeholder="kein Key gespeichert"></label>
+                        <label>Ziel A — Tabelle<input type="text" id="cust-stats-table"></label>
+                    </div>
+                    <div class="row-actions">
+                        <button class="btn btn-small" onclick="testTarget('customer_stats', 'cust-stats-test')">Ziel A testen</button>
+                    </div>
+                    <div id="cust-stats-test"></div>
+
+                    <div class="fields">
+                        <label>Ziel B — Supabase URL<input type="text" id="cust-users-url" placeholder="https://xxx.supabase.co"></label>
+                        <label>Ziel B — Key<input type="text" id="cust-users-key" placeholder="kein Key gespeichert"></label>
+                        <label>Ziel B — Tabelle<input type="text" id="cust-users-table"></label>
+                    </div>
+                    <div class="row-actions">
+                        <button class="btn btn-small" onclick="testTarget('customer_users', 'cust-users-test')">Ziel B testen</button>
+                    </div>
+                    <div id="cust-users-test"></div>
+
+                    <div class="row-actions">
+                        <button class="btn btn-small" style="background:#4caf50;" onclick="runStats('customer')">Jetzt hochladen</button>
+                        <button class="btn btn-small" style="background:#666;" onclick="previewCustomer()">Vorschau (kein Upload)</button>
+                        <span class="last-run" id="cust-last-run"></span>
+                    </div>
+                    <div id="cust-preview"></div>
+                </div>
+
+                <div class="stats-block">
+                    <strong>Altes Upload-Skript (LaunchAgent)</strong>
+                    <div class="hint">Wird nach dem ersten erfolgreichen Kunden-Upload automatisch deaktiviert, damit die Zahlen nicht doppelt geschrieben werden. Deaktivieren heißt umbenennen — jederzeit reversibel.</div>
+                    <label class="switch" style="margin-top:10px;"><input type="checkbox" id="cust-auto-disable"> automatisch deaktivieren</label>
+                    <div id="legacy-block" style="margin-top:10px;"></div>
+                </div>
+
+                <div class="hint">Keys werden maskiert angezeigt. Feld leer lassen = Key bleibt unverändert, „-" eintragen = Key löschen.</div>
+                <button class="btn" onclick="saveStatsSettings()">Einstellungen speichern</button>
+                <div id="stats-settings-msg"></div>
+                <div id="stats-run-msg"></div>
             </div>
 
             <div class="card">
@@ -240,6 +419,14 @@ async def get_dashboard():
                     // "Disable Watch" only while the watchdog is active.
                     document.getElementById('rustdesk-start-btn').style.display = (data.rustdesk_running && data.rustdesk_watch) ? 'none' : '';
                     document.getElementById('rustdesk-stop-btn').style.display = data.rustdesk_watch ? '' : 'none';
+
+                    // Statistics uploads
+                    const runs = data.last_runs || {};
+                    setStatsStatus('dash-stats-status', data.dashboard_stats_enabled, runs.dashboard_stats);
+                    setStatsStatus('cust-stats-status', data.customer_stats_enabled, runs.customer_stats,
+                                   data.customer_stats_source);
+                    renderLastRun('dash-last-run', runs.dashboard_stats);
+                    renderLastRun('cust-last-run', runs.customer_stats);
 
                     document.getElementById('scheduler-status').textContent = '✓ Running';
                     document.getElementById('server-name').textContent = data.server_name;
@@ -660,10 +847,278 @@ async def get_dashboard():
                 }
             }
 
+            // ── Statistik-Uploads ─────────────────────────────────────
+
+            function setStatsStatus(elementId, enabled, run, source) {
+                const el = document.getElementById(elementId);
+                if (!el) return;
+                let text = enabled ? '✓ Aktiv' : '✗ Aus';
+                if (source) text += ` (${source === 'superdb' ? 'super.db' : 'sessions'})`;
+                if (run && run.status && run.status !== 'success') text += ` — letzter Lauf: ${run.status}`;
+                el.textContent = text;
+                el.style.color = enabled ? '#4caf50' : '#f44336';
+            }
+
+            function renderLastRun(elementId, run) {
+                const el = document.getElementById(elementId);
+                if (!el) return;
+                if (!run) { el.textContent = 'noch nicht gelaufen'; return; }
+                const when = run.at ? run.at.replace('T', ' ') : '?';
+                el.textContent = `zuletzt ${when} — ${run.status}${run.summary ? ': ' + run.summary : ''}`;
+            }
+
+            function setValue(id, value) {
+                const el = document.getElementById(id);
+                if (el) el.value = value === null || value === undefined ? '' : value;
+            }
+
+            function setKeyField(id, masked) {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.value = '';
+                el.placeholder = masked || 'kein Key gespeichert';
+            }
+
+            function updateSourceHint() {
+                const select = document.getElementById('cust-source');
+                const hint = document.getElementById('cust-source-hint');
+                if (!select || !hint) return;
+                if (select.value === 'superdb') {
+                    const fields = (statsSettings && statsSettings.customer.unavailable_fields) || [];
+                    hint.style.display = 'block';
+                    hint.textContent = 'Hinweis: Die super.db kennt keine Session-Details. '
+                        + 'Diese Felder bleiben in diesem Modus leer: ' + fields.join(', ')
+                        + '. Ausserdem werden die session_id mit dem Servernamen praefigiert, '
+                        + 'weil die IDs der super.db auf allen Macs gleich sind.';
+                } else {
+                    hint.style.display = 'none';
+                }
+            }
+
+            let statsSettings = null;
+
+            async function loadStatsSettings() {
+                try {
+                    const resp = await fetch('/api/stats/settings');
+                    const data = await resp.json();
+                    statsSettings = data;
+
+                    document.getElementById('dash-enabled').checked = !!data.dashboard.enabled;
+                    setValue('dash-url', data.dashboard.url);
+                    setKeyField('dash-key', data.dashboard.key_masked);
+                    setValue('dash-t-device', data.dashboard.tables.device);
+                    setValue('dash-t-profile', data.dashboard.tables.profile);
+                    setValue('dash-t-stats', data.dashboard.tables.stats);
+                    setValue('dash-t-bin', data.dashboard.tables.bin);
+
+                    document.getElementById('cust-enabled').checked = !!data.customer.enabled;
+                    setValue('cust-source', data.customer.source || 'sessions');
+                    setValue('cust-limit', data.customer.session_limit);
+                    setValue('cust-stats-url', data.customer.stats.url);
+                    setKeyField('cust-stats-key', data.customer.stats.key_masked);
+                    setValue('cust-stats-table', data.customer.stats.table);
+                    setValue('cust-users-url', data.customer.users.url);
+                    setKeyField('cust-users-key', data.customer.users.key_masked);
+                    setValue('cust-users-table', data.customer.users.table);
+                    document.getElementById('cust-auto-disable').checked = !!data.customer.auto_disable_legacy_upload;
+
+                    updateSourceHint();
+                    renderLegacy(data.legacy_upload);
+                } catch (e) {
+                    console.error('Failed to load stats settings:', e);
+                }
+            }
+
+            async function saveStatsSettings() {
+                const msgDiv = document.getElementById('stats-settings-msg');
+                const body = {
+                    dashboard_stats_enabled: document.getElementById('dash-enabled').checked,
+                    supabase_url: document.getElementById('dash-url').value.trim(),
+                    dashboard_table_device: document.getElementById('dash-t-device').value.trim(),
+                    dashboard_table_profile: document.getElementById('dash-t-profile').value.trim(),
+                    dashboard_table_stats: document.getElementById('dash-t-stats').value.trim(),
+                    dashboard_table_bin: document.getElementById('dash-t-bin').value.trim(),
+                    customer_stats_enabled: document.getElementById('cust-enabled').checked,
+                    customer_stats_source: document.getElementById('cust-source').value,
+                    customer_stats_session_limit: parseInt(document.getElementById('cust-limit').value, 10) || 90,
+                    customer_stats_url: document.getElementById('cust-stats-url').value.trim(),
+                    customer_stats_table: document.getElementById('cust-stats-table').value.trim(),
+                    customer_users_url: document.getElementById('cust-users-url').value.trim(),
+                    customer_users_table: document.getElementById('cust-users-table').value.trim(),
+                    auto_disable_legacy_upload: document.getElementById('cust-auto-disable').checked
+                };
+
+                // Keys only travel when something was actually typed
+                const keyFields = {
+                    supabase_key: 'dash-key',
+                    customer_stats_key: 'cust-stats-key',
+                    customer_users_key: 'cust-users-key'
+                };
+                for (const [field, id] of Object.entries(keyFields)) {
+                    const value = document.getElementById(id).value.trim();
+                    if (value) body[field] = value;
+                }
+
+                msgDiv.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Speichern...</div>';
+                try {
+                    const resp = await fetch('/api/config', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body)
+                    });
+                    if (resp.ok) {
+                        msgDiv.innerHTML = '<div class="status-msg success">✓ Gespeichert</div>';
+                        loadStatsSettings();
+                        loadStatus();
+                    } else {
+                        const err = await resp.json().catch(() => ({}));
+                        msgDiv.innerHTML = `<div class="status-msg error">✗ Speichern fehlgeschlagen: ${err.detail || resp.status}</div>`;
+                    }
+                } catch (e) {
+                    msgDiv.innerHTML = `<div class="status-msg error">✗ Fehler: ${e.message}</div>`;
+                }
+                setTimeout(() => { msgDiv.innerHTML = ''; }, 10000);
+            }
+
+            async function testTarget(target, outputId) {
+                const out = document.getElementById(outputId);
+                out.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Teste Verbindung...</div>';
+                try {
+                    const resp = await fetch('/api/stats/test', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ target: target })
+                    });
+                    const data = await resp.json();
+                    if (!resp.ok) {
+                        out.innerHTML = `<div class="status-msg error">${data.detail || 'Test fehlgeschlagen'}</div>`;
+                        return;
+                    }
+                    out.innerHTML = data.targets ? data.targets.map(renderTargetInfo).join('') : renderTargetInfo(data);
+                } catch (e) {
+                    out.innerHTML = `<div class="status-msg error">Test fehlgeschlagen: ${e.message}</div>`;
+                }
+            }
+
+            function renderTargetInfo(info) {
+                const label = info.source_table ? `${info.source_table} → ${info.table}` : info.table;
+                if (info.status === 'not_configured') {
+                    return `<div class="status-msg error">${label}: nicht konfiguriert (${info.error || ''})</div>`;
+                }
+                if (info.status === 'error') {
+                    return `<div class="status-msg error">${label}: ${info.error || 'Fehler'}</div>`;
+                }
+                let html = '';
+                const rows = info.rows === null || info.rows === undefined ? '?' : info.rows;
+                const note = info.note ? ` — ${info.note}` : '';
+                if (info.status === 'incomplete') {
+                    html += `<div class="status-msg error">${label}: erreichbar, aber ${info.missing.length} Spalte(n) fehlen (${info.columns} vorhanden, ${rows} Zeilen)${note}</div>`;
+                    html += `<div class="code">${escapeHtml(info.missing.join(', '))}\n\n${escapeHtml(info.sql || '')}</div>`;
+                } else {
+                    html += `<div class="status-msg success">${label}: OK — ${info.columns} Spalten, ${rows} Zeilen${note}</div>`;
+                }
+                if (info.hint) html += `<div class="code">${escapeHtml(info.hint)}</div>`;
+                return html;
+            }
+
+            function escapeHtml(text) {
+                return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            }
+
+            async function runStats(which) {
+                const label = which === 'dashboard' ? 'Statistik (Dashboard)' : 'Statistik (Kunde)';
+                const msgDiv = document.getElementById('stats-run-msg');
+                const url = which === 'dashboard' ? '/api/stats/dashboard/run' : '/api/stats/customer/run';
+
+                msgDiv.innerHTML = `<div class="status-msg loading"><span class="spinner"></span> ${label} läuft... (kann einige Minuten dauern)</div>`;
+                try {
+                    const resp = await fetch(url, { method: 'POST' });
+                    const result = await resp.json();
+                    if (!resp.ok) {
+                        msgDiv.innerHTML = `<div class="status-msg error">${label}: ${result.detail || 'Fehler'}</div>`;
+                        return;
+                    }
+                    const summary = which === 'dashboard'
+                        ? Object.entries(result.tables || {}).map(([k, v]) => `${k}=${v.count !== undefined ? v.count : v.status}`).join(', ')
+                        : `${result.sessions} Sessions | ${result.statistik.table || 'Ziel A'}: ${result.statistik.written !== undefined ? result.statistik.written : result.statistik.status}`
+                          + ` | ${result.users.table || 'Ziel B'}: ${result.users.written !== undefined ? result.users.written + ' neu, ' + result.users.skipped_existing + ' vorhanden' : result.users.status}`;
+                    const cssClass = (result.status === 'success') ? 'success' : 'error';
+                    msgDiv.innerHTML = `<div class="status-msg ${cssClass}">${label} ${result.status}: ${summary}${result.error ? ' — ' + result.error : ''}</div>`;
+                    loadStatus();
+                    loadStatsSettings();
+                } catch (e) {
+                    msgDiv.innerHTML = `<div class="status-msg error">${label} fehlgeschlagen: ${e.message}</div>`;
+                }
+                setTimeout(() => { msgDiv.innerHTML = ''; }, 30000);
+            }
+
+            async function previewCustomer() {
+                const out = document.getElementById('cust-preview');
+                out.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Daten werden eingelesen...</div>';
+                try {
+                    const resp = await fetch('/api/stats/customer/preview', { method: 'POST' });
+                    const data = await resp.json();
+                    if (!resp.ok || data.status === 'error') {
+                        out.innerHTML = `<div class="status-msg error">Vorschau fehlgeschlagen: ${data.error || data.detail || 'unbekannt'}</div>`;
+                        return;
+                    }
+                    out.innerHTML = `<div class="status-msg success">Quelle ${data.source}: ${data.accounts} Accounts, `
+                        + `${data.sessions} Sessions, ${data.missing_sessions} Missing-Einträge — nichts hochgeladen.</div>`
+                        + `<div class="code">${escapeHtml(JSON.stringify(data.preview, null, 1))}</div>`;
+                } catch (e) {
+                    out.innerHTML = `<div class="status-msg error">Vorschau fehlgeschlagen: ${e.message}</div>`;
+                }
+            }
+
+            function renderLegacy(info) {
+                const el = document.getElementById('legacy-block');
+                if (!el) return;
+                if (!info || !info.found) {
+                    el.innerHTML = '<div class="hint">Kein LaunchAgent gefunden, der ein Upload-Skript startet.</div>';
+                    return;
+                }
+                // Index instead of the path: file paths must never end up inside
+                // an inline onclick attribute.
+                el.innerHTML = info.agents.map((agent, index) => `
+                    <div class="status">
+                        <span>${escapeHtml(agent.label)}<div class="hint">${escapeHtml(agent.script)}</div></span>
+                        <span>
+                            <span class="${agent.enabled ? 'online' : 'offline'}">${agent.enabled ? 'aktiv' : 'deaktiviert'}</span>
+                            <button class="btn btn-small" style="background:${agent.enabled ? '#d32f2f' : '#666'};"
+                                onclick="legacyAction('${agent.enabled ? 'disable' : 'enable'}', ${index})">
+                                ${agent.enabled ? 'Deaktivieren' : 'Reaktivieren'}
+                            </button>
+                        </span>
+                    </div>`).join('');
+            }
+
+            async function legacyAction(action, index) {
+                const agent = statsSettings && statsSettings.legacy_upload
+                    && statsSettings.legacy_upload.agents[index];
+                if (!agent) return;
+                const path = agent.path;
+                if (action === 'disable' && !confirm('Diesen LaunchAgent deaktivieren? Die Datei wird nur umbenannt und kann jederzeit reaktiviert werden.')) return;
+                try {
+                    const resp = await fetch(`/api/legacy-upload/${action}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: path })
+                    });
+                    if (!resp.ok) {
+                        const err = await resp.json().catch(() => ({}));
+                        alert('Fehlgeschlagen: ' + (err.detail || resp.status));
+                    }
+                    loadStatsSettings();
+                } catch (e) {
+                    alert('Fehler: ' + e.message);
+                }
+            }
+
             // Load data on page load and refresh every 30s
             loadStatus();
             loadDevices();
             loadVersions();
+            loadStatsSettings();
             setInterval(loadStatus, 30000);
             setInterval(loadDevices, 30000);
         </script>
@@ -687,6 +1142,10 @@ async def get_status():
             "auto_restart": is_auto_restart_enabled(),
             "rustdesk_running": is_rustdesk_running(),
             "rustdesk_watch": is_rustdesk_watch_enabled(),
+            "dashboard_stats_enabled": config.dashboard_stats_enabled,
+            "customer_stats_enabled": config.customer_stats_enabled,
+            "customer_stats_source": config.customer_stats_source,
+            "last_runs": run_state.get_runs(),
             "sync_times": config.sync_times,
             "jobs": scheduler.get_jobs(),
             "version": get_current_version(),
@@ -892,6 +1351,50 @@ async def update_config(update: ConfigUpdate):
         if update.blacklist is not None:
             config.blacklist = update.blacklist
 
+        # ── Statistik (Dashboard) ──
+        if update.dashboard_stats_enabled is not None:
+            config.dashboard_stats_enabled = update.dashboard_stats_enabled
+        if update.supabase_url is not None:
+            config.supabase_url = update.supabase_url.strip()
+        config.supabase_key = _apply_key(config.supabase_key, update.supabase_key)
+        for field in ("device", "profile", "stats", "bin"):
+            # Strip first: a whitespace-only name would otherwise wipe the table
+            value = (getattr(update, f"dashboard_table_{field}") or "").strip()
+            if value:
+                setattr(config, f"dashboard_table_{field}", value)
+
+        # ── Statistik (Kunde) ──
+        if update.customer_stats_enabled is not None:
+            config.customer_stats_enabled = update.customer_stats_enabled
+        if update.customer_stats_source is not None:
+            source = update.customer_stats_source.strip()
+            if source not in ("sessions", "superdb"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="customer_stats_source muss 'sessions' oder 'superdb' sein",
+                )
+            config.customer_stats_source = source
+        if update.customer_stats_session_limit is not None:
+            config.customer_stats_session_limit = max(
+                1, int(update.customer_stats_session_limit)
+            )
+        if update.customer_stats_url is not None:
+            config.customer_stats_url = update.customer_stats_url.strip()
+        config.customer_stats_key = _apply_key(
+            config.customer_stats_key, update.customer_stats_key
+        )
+        if (update.customer_stats_table or "").strip():
+            config.customer_stats_table = update.customer_stats_table.strip()
+        if update.customer_users_url is not None:
+            config.customer_users_url = update.customer_users_url.strip()
+        config.customer_users_key = _apply_key(
+            config.customer_users_key, update.customer_users_key
+        )
+        if (update.customer_users_table or "").strip():
+            config.customer_users_table = update.customer_users_table.strip()
+        if update.auto_disable_legacy_upload is not None:
+            config.auto_disable_legacy_upload = update.auto_disable_legacy_upload
+
         config.save()
         logger.info("Configuration updated")
 
@@ -903,9 +1406,138 @@ async def update_config(update: ConfigUpdate):
                 "blacklist": config.blacklist,
             },
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to update config: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Statistik-Uploads ─────────────────────────────────────────────────
+
+
+@app.get("/api/stats/settings")
+async def get_stats_settings():
+    """Settings and state of both statistics uploads."""
+    try:
+        config = get_config()
+        return {
+            "dashboard": {
+                "enabled": config.dashboard_stats_enabled,
+                "url": config.supabase_url,
+                "key_masked": _mask_key(config.supabase_key),
+                "tables": {
+                    "device": config.dashboard_table_device,
+                    "profile": config.dashboard_table_profile,
+                    "stats": config.dashboard_table_stats,
+                    "bin": config.dashboard_table_bin,
+                },
+            },
+            "customer": {
+                "enabled": config.customer_stats_enabled,
+                "source": config.customer_stats_source,
+                "session_limit": config.customer_stats_session_limit,
+                "auto_disable_legacy_upload": config.auto_disable_legacy_upload,
+                "stats": {
+                    "url": config.customer_stats_url,
+                    "key_masked": _mask_key(config.customer_stats_key),
+                    "table": config.customer_stats_table,
+                },
+                "users": {
+                    "url": config.customer_users_url,
+                    "key_masked": _mask_key(config.customer_users_key),
+                    "table": config.customer_users_table,
+                },
+                "unavailable_fields": SUPERDB_UNAVAILABLE_FIELDS,
+            },
+            "legacy_upload": legacy_upload.get_status(),
+            "last_runs": run_state.get_runs(),
+        }
+    except Exception as e:
+        logger.error(f"Failed to get stats settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/stats/dashboard/run")
+async def run_dashboard_stats():
+    """Run the dashboard sync now (works regardless of the toggle)."""
+    import asyncio
+
+    try:
+        return await asyncio.to_thread(trigger_sync, True)
+    except Exception as e:
+        logger.error(f"Dashboard statistics run failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/stats/customer/run")
+async def run_customer_stats():
+    """Run the customer statistics upload now (works regardless of the toggle)."""
+    import asyncio
+
+    try:
+        return await asyncio.to_thread(run_customer_stats_upload, "manual")
+    except Exception as e:
+        logger.error(f"Customer statistics run failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/stats/customer/preview")
+async def preview_customer_stats():
+    """Dry run: collect and map the data without uploading anything."""
+    import asyncio
+
+    try:
+        return await asyncio.to_thread(run_customer_stats_upload, "preview", True)
+    except Exception as e:
+        logger.error(f"Customer statistics preview failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/stats/test")
+async def test_stats_target(req: TargetRequest):
+    """Check reachability and columns of an upload target."""
+    import asyncio
+
+    try:
+        if req.target == "dashboard":
+            return await asyncio.to_thread(check_dashboard_target)
+        if req.target in ("customer_stats", "customer_users"):
+            return await asyncio.to_thread(check_customer_target, req.target)
+        raise HTTPException(status_code=400, detail=f"Unbekanntes Ziel: {req.target}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Target test failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/legacy-upload")
+async def get_legacy_upload():
+    """List LaunchAgents that start a legacy upload script."""
+    return legacy_upload.get_status()
+
+
+@app.post("/api/legacy-upload/disable")
+async def disable_legacy_upload(req: AgentRequest):
+    """Disable a legacy upload LaunchAgent (reversible)."""
+    import asyncio
+
+    result = await asyncio.to_thread(legacy_upload.disable_agent, req.path)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.post("/api/legacy-upload/enable")
+async def enable_legacy_upload(req: AgentRequest):
+    """Re-enable a previously disabled legacy upload LaunchAgent."""
+    import asyncio
+
+    result = await asyncio.to_thread(legacy_upload.enable_agent, req.path)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 @app.post("/api/bot/restart")

@@ -12,18 +12,23 @@ import time
 from supabase import create_client, Client
 from config import get_config
 from log_uploader import upload_bot_logs
+from supabase_rest import describe_target
+import run_state
 
 logger = logging.getLogger(__name__)
 
 # PostgreSQL maximum identifier length
 PG_MAX_IDENTIFIER = 63
 
-# Table mappings: SQLite table → Supabase table
-TABLE_MAPPINGS = {
-    "device": {"sb_table": "device"},
-    "profile": {"sb_table": "profile"},
-    "stats": {"sb_table": "stats"},
-}
+
+def get_table_mappings() -> dict[str, str]:
+    """SQLite table → Supabase table, taken from the configured names."""
+    config = get_config()
+    return {
+        "device": config.dashboard_table_device,
+        "profile": config.dashboard_table_profile,
+        "stats": config.dashboard_table_stats,
+    }
 
 
 class SyncError(Exception):
@@ -449,7 +454,7 @@ class SyncManager:
         After upserting current records, removes stale rows from Supabase
         that no longer exist in the local bin table for this mac prefix.
         """
-        sb_table = "bin"
+        sb_table = get_config().dashboard_table_bin
         result = {"status": "success", "count": 0, "deleted_stale": 0}
 
         # Query only the 3 columns from SQLite
@@ -548,9 +553,21 @@ class SyncManager:
 
             db_conn = sqlite3.connect(temp_db_path)
 
-            for table_key, mapping in TABLE_MAPPINGS.items():
+            config = get_config()
+            stats_enabled = config.dashboard_stats_enabled
+
+            for table_key, sb_table in get_table_mappings().items():
                 try:
-                    sb_table = mapping["sb_table"]
+                    # "Statistik (Dashboard)" only gates the stats table — device,
+                    # profile, bin and the log upload keep running either way.
+                    if table_key == "stats" and not stats_enabled:
+                        sync_result["tables"][table_key] = {
+                            "status": "disabled",
+                            "count": 0,
+                        }
+                        logger.info("  stats: Statistik (Dashboard) ist aus — übersprungen")
+                        continue
+
                     logger.info(f"--- Syncing table: {table_key} → {sb_table} ---")
 
                     records = self._query_table(db_conn, table_key)
@@ -677,6 +694,17 @@ class SyncManager:
                 except Exception as e:
                     logger.warning(f"Failed to delete temp DB: {e}")
 
+        summary = ", ".join(
+            f"{table}={info.get('count', info.get('status'))}"
+            for table, info in sync_result.get("tables", {}).items()
+        )
+        run_state.record_run(
+            "dashboard_stats",
+            sync_result.get("status", "unknown"),
+            summary or sync_result.get("error", ""),
+            "manual" if upload_all_logs else "auto",
+        )
+
         return sync_result
 
 
@@ -685,11 +713,117 @@ _sync_manager: SyncManager | None = None
 
 
 def get_sync_manager() -> SyncManager:
-    """Get singleton SyncManager instance."""
+    """Get singleton SyncManager instance.
+
+    Rebuilt when the configured Supabase target, server name or database path
+    changed, so edits in the dashboard settings take effect without a restart.
+    """
     global _sync_manager
-    if _sync_manager is None:
+    config = get_config()
+    if (
+        _sync_manager is None
+        or _sync_manager.supabase_url != config.supabase_url
+        or _sync_manager.supabase_key != config.supabase_key
+        or _sync_manager.server_prefix != config.server_name
+        or _sync_manager.db_path != Path(config.sqlite_db_path).expanduser()
+    ):
         _sync_manager = SyncManager()
     return _sync_manager
+
+
+# Metadata columns _enrich_record adds to every record
+DASHBOARD_META_COLUMNS = {
+    "mac_id": "text",
+    "ig_server": "text",
+    "imported_at": "timestamp",
+    "change_at": "timestamp",
+}
+
+BIN_COLUMNS = {
+    "id": "text",
+    "config__username": "text",
+    "noneoption__email": "text",
+}
+
+
+def _local_table_columns() -> dict[str, list[str]]:
+    """Read the column names of the local SQLite tables."""
+    config = get_config()
+    db_path = Path(config.sqlite_db_path).expanduser()
+    if not db_path.exists():
+        return {}
+
+    temp_path = Path(f"/tmp/schema_check_{datetime.now():%Y%m%d_%H%M%S}.db")
+    columns: dict[str, list[str]] = {}
+    try:
+        shutil.copy2(db_path, temp_path)
+        conn = sqlite3.connect(temp_path)
+        try:
+            for table in ("device", "profile", "stats"):
+                try:
+                    columns[table] = [
+                        row[1] for row in conn.execute(f"PRAGMA table_info({table});")
+                    ]
+                except Exception as e:
+                    logger.debug(f"PRAGMA failed for '{table}': {e}")
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"Could not inspect local schema: {e}")
+    finally:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+
+    return columns
+
+
+def check_dashboard_target() -> dict:
+    """Connection test for the dashboard Supabase (per table)."""
+    config = get_config()
+
+    if not config.supabase_url or not config.supabase_key:
+        return {
+            "status": "not_configured",
+            "error": "Supabase URL oder Key fehlt",
+            "targets": [],
+        }
+
+    local_columns = _local_table_columns()
+    tables = get_table_mappings()
+    tables["bin"] = config.dashboard_table_bin
+
+    targets = []
+    for source_table, sb_table in tables.items():
+        if source_table == "bin":
+            expected = dict(BIN_COLUMNS)
+        else:
+            expected = {
+                col[:PG_MAX_IDENTIFIER]: "text"
+                for col in local_columns.get(source_table, [])
+            }
+            expected.update(DASHBOARD_META_COLUMNS)
+
+        info = describe_target(
+            config.supabase_url, config.supabase_key, sb_table, expected or None
+        )
+        info["source_table"] = source_table
+        if source_table == "stats" and not config.dashboard_stats_enabled:
+            info["note"] = "Statistik (Dashboard) ist aktuell ausgeschaltet"
+        if not local_columns.get(source_table) and source_table != "bin":
+            info["note"] = "Lokale super.db nicht lesbar — Spaltenabgleich übersprungen"
+        targets.append(info)
+
+    statuses = [t["status"] for t in targets]
+    if "error" in statuses:
+        status = "error"
+    elif "incomplete" in statuses:
+        status = "incomplete"
+    else:
+        status = "ok"
+
+    return {"status": status, "targets": targets}
 
 
 def trigger_sync(upload_all_logs: bool = False) -> dict:

@@ -2,7 +2,7 @@
 
 import json
 import os
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
 from typing import Optional
 import logging
@@ -33,6 +33,30 @@ class AppConfig:
     log_level: str = "INFO"
     github_repo: str = ""  # e.g. "username/mactool" — for self-update
 
+    # ── Statistik (Dashboard) ────────────────────────────────────────
+    # Target is supabase_url / supabase_key above. The toggle only gates the
+    # `stats` table — device, profile, bin and the bot log upload keep running.
+    dashboard_stats_enabled: bool = True
+    dashboard_table_device: str = "device"
+    dashboard_table_profile: str = "profile"
+    dashboard_table_stats: str = "stats"
+    dashboard_table_bin: str = "bin"
+
+    # ── Statistik (Kunde) ────────────────────────────────────────────
+    # Replaces the per-mac `upload-macXX.py` LaunchAgent scripts. Two targets:
+    # raw session data (upsert) and the "beautified" users table (insert).
+    customer_stats_enabled: bool = False
+    customer_stats_source: str = "sessions"  # "sessions" | "superdb"
+    customer_stats_session_limit: int = 90
+    customer_stats_url: str = "https://eeshaewrbrqipsvtlyng.supabase.co"
+    customer_stats_key: str = ""
+    customer_stats_table: str = "statistik"
+    customer_users_url: str = "https://apltfvenhqwnidmuptdp.supabase.co"
+    customer_users_key: str = ""
+    customer_users_table: str = "users"
+    # Disable the legacy upload LaunchAgent once our own upload succeeded once
+    auto_disable_legacy_upload: bool = True
+
     def save(self):
         """Save configuration to config.json."""
         try:
@@ -52,8 +76,20 @@ class AppConfig:
             try:
                 with open(CONFIG_FILE, "r") as f:
                     data = json.load(f)
+
+                # Ignore keys this version doesn't know. Without this, running an
+                # older version (via the dashboard's version selector) against a
+                # config.json written by a newer one raises TypeError and the
+                # service falls back to an empty default config.
+                known = {f.name for f in fields(AppConfig)}
+                unknown = sorted(set(data) - known)
+                if unknown:
+                    logger.warning(
+                        f"Ignoring unknown config keys (newer version?): {', '.join(unknown)}"
+                    )
+
                 logger.info(f"Configuration loaded from {CONFIG_FILE}")
-                return AppConfig(**data)
+                return AppConfig(**{k: v for k, v in data.items() if k in known})
             except Exception as e:
                 logger.error(f"Failed to load config from file: {e}")
 

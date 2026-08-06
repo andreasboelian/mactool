@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.0.109 — 2026-08-06
+- **Statistik (Dashboard)**: An/Aus-Schalter für den bestehenden Upload. Betrifft nur die
+  `stats`-Tabelle — `device`, `profile`, `bin` und die Bot-Logs laufen unabhängig weiter
+- **Statistik (Kunde)**: Der Upload aus `upload-macXX.py` läuft jetzt im Mactool. Zwei Ziele,
+  jedes einzeln konfigurierbar: `statistik` (Rohdaten, Upsert auf `session_id`) und `users`
+  (verschönerte Zahlen + Missing-Session-Einträge). Verschönerungs- und Missing-Logik
+  unverändert aus dem Altskript übernommen
+- `serverzuordnung` kommt aus `server_name` — kein eigenes Skript je Mac mehr nötig
+- Datenquelle für den Kunden-Upload umschaltbar: `sessions.json` (Standard) oder die
+  `stats`-Tabelle der super.db. Im super.db-Modus bleiben `successful_interactions`, `posts`,
+  `total_scraped`, `args` und `profile` leer (Hinweis im Dashboard)
+- Beide Uploads manuell auslösbar — unabhängig davon, ob der jeweilige Schalter an ist
+- Automatisch laufen beide nacheinander zu den bestehenden `sync_times`
+- Dashboard-Karte „Statistik-Uploads": URL, Key (maskiert) und Tabellenname für beide
+  Statistiken frei einstellbar; leeres Key-Feld = unverändert, `-` = löschen
+- „Verbindung testen" je Ziel: prüft Erreichbarkeit, listet fehlende Spalten und erzeugt das
+  passende `ALTER TABLE`-SQL (Spalten anlegen geht über die Supabase-REST-API nicht)
+- „Vorschau" zeigt die fertig gemappten Daten, ohne etwas hochzuladen
+- Batch-Upload statt ~30.000 Einzelrequests pro Lauf, mit Retry/Backoff bei 429/5xx und
+  zeilenweisem Fallback, wenn ein Batch kippt
+- Missing-Session-Einträge max. 1× pro Tag und Account (das Altskript lief 1× nachts, das
+  Mactool läuft mehrmals täglich)
+- Altes Upload-LaunchAgent wird erkannt und nach dem ersten erfolgreichen Kunden-Upload
+  automatisch deaktiviert (nur Umbenennen, jederzeit reversibel); Buttons im Dashboard
+- Letzter Lauf je Upload wird protokolliert und im Dashboard angezeigt
+- CLI: `--customer-stats` und `--customer-stats-preview`
+- `config.json` mit unbekannten Feldern führt nicht mehr zum Absturz (Downgrade auf eine
+  ältere Version über die Versionsauswahl)
+- Sync erkennt geänderte Supabase-Einstellungen ohne Neustart
+- Neue Abhängigkeit: PyYAML (mit Fallback-Parser, falls die Installation fehlschlägt)
+
 ## v1.0.108 — 2026-06-02
 - RustDesk-Watchdog: stellt sicher, dass RustDesk.app immer läuft; startet sie automatisch neu, wenn sie geschlossen wurde (Standard-Intervall: alle 5 Min)
 - Dashboard: RustDesk-Status (läuft/läuft nicht) + Watch-Status (aktiv/deaktiviert)
