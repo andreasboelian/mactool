@@ -105,6 +105,32 @@ Alles umgesetzt und verifiziert. Neue Dateien: `customer_stats.py`, `supabase_re
   identisch sind. Im sessions-Modus (UUIDs) bleibt sie unverändert.
 - Batch- statt Einzelrequests. Ergebnis identisch, nur ~263 statt ~31.000 Requests pro Lauf.
 
+### Nachtrag v1.0.110 — Bug in der Spaltenerkennung
+
+Beim ersten Test auf mac17 meldete der Verbindungstest für `users` vier fehlende Spalten
+(`total_watched`, `device`, `total_scraped`, `serverzuordnung`), obwohl sie existieren.
+
+Ursache: bei `apltfvenhqwnidmuptdp` antwortet die OpenAPI-Introspektion für den anon-Key mit
+401, also griff der Fallback „eine Zeile lesen und Schlüssel zählen". Der zeigt aber nur die
+Spalten, die der Key **lesen** darf — 15 von 19. Belegt ist die Existenz der Spalten dadurch,
+dass das alte Skript sie mitschickt und dabei allein in der Nacht 370 Zeilen erfolgreich
+geschrieben hat; PostgREST hätte sonst jede abgelehnt.
+
+Gefährlich war nicht die Meldung, sondern dass dieselbe Erkennung den Upload-Payload
+filterte: `device` und `serverzuordnung` wären beim ersten Lauf lautlos verschwunden.
+Ausgelöst hat das nichts — im Screenshot stand „noch nicht gelaufen", und die 171 Zeilen von
+heute ab 09:00 stammen vom alten Skript (Zeitstempel über eine Stunde im 30-Sekunden-Takt,
+das Einzelrequest-Muster; mein Code schreibt in einem Batch).
+
+Behoben: Vorfiltern nur noch bei lesbarer OpenAPI-Spec, sonst alles senden und eine Spalte
+erst entfernen, wenn die Datenbank sie wirklich ablehnt (PGRST204/42703). Verbindungstest
+unterscheidet jetzt `incomplete` von `unverified`. Zeilenzahl via `count=planned`, weil
+`count=exact` auf der grossen users-Tabelle einen 500er auslöste.
+
+Getestet mit einem Mock, der genau diese Konstellation nachbaut (OpenAPI 401, Stichprobe mit
+15 von 19 Spalten): alle vier Felder kommen jetzt mit echten Werten an; eine tatsächlich
+fehlende Spalte wird entfernt, ohne die übrigen zu verlieren.
+
 ### Offen (nur auf Wunsch)
 - Commit + Tag v1.0.109 + Push
 - Pro Mac: Keys eintragen, Toggle „Statistik (Kunde)" einschalten

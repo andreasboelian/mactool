@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.0.110 — 2026-08-06
+- **Fix: keine stillen Datenverluste mehr beim Kunden-Upload.** Die Spaltenerkennung fiel,
+  wenn ein Key die Tabellenstruktur nicht auslesen darf (anon-Key, OpenAPI antwortet 401),
+  auf eine Zeilen-Stichprobe zurück. Die zeigt aber nur Spalten, die der Key **lesen** darf —
+  bei `users` sind das 15 von 19. `device`, `total_watched`, `total_scraped` und
+  `serverzuordnung` wären dadurch aus jeder Zeile entfernt worden, ohne Fehlermeldung
+- Spalten werden jetzt nur noch anhand der OpenAPI-Spec vorgefiltert (echtes Schema).
+  Ist die nicht lesbar, werden alle Felder gesendet
+- Eine Spalte wird nur noch entfernt, wenn die Datenbank sie tatsächlich ablehnt
+  (PGRST204 / 42703) — dann für den restlichen Upload, und der Lauf meldet welche
+- Verbindungstest unterscheidet „fehlt wirklich" (Status `incomplete`) von „nicht prüfbar,
+  weil der Key nicht introspizieren darf" (Status `unverified`) statt fälschlich Alarm zu geben
+- Zeilenzahl im Verbindungstest via `count=planned` statt `count=exact` — bei grossen
+  Tabellen lief der exakte Count in einen 500er (Anzeige „? Zeilen")
+
 ## v1.0.109 — 2026-08-06
 - **Statistik (Dashboard)**: An/Aus-Schalter für den bestehenden Upload. Betrifft nur die
   `stats`-Tabelle — `device`, `profile`, `bin` und die Bot-Logs laufen unabhängig weiter

@@ -1009,11 +1009,17 @@ async def get_dashboard():
                     return `<div class="status-msg error">${label}: ${info.error || 'Fehler'}</div>`;
                 }
                 let html = '';
-                const rows = info.rows === null || info.rows === undefined ? '?' : info.rows;
+                const rows = info.rows === null || info.rows === undefined ? '?' : '~' + info.rows;
                 const note = info.note ? ` — ${info.note}` : '';
                 if (info.status === 'incomplete') {
-                    html += `<div class="status-msg error">${label}: erreichbar, aber ${info.missing.length} Spalte(n) fehlen (${info.columns} vorhanden, ${rows} Zeilen)${note}</div>`;
+                    html += `<div class="status-msg error">${label}: erreichbar, aber ${info.missing.length} Spalte(n) fehlen wirklich (${info.columns} vorhanden, ${rows} Zeilen)${note}</div>`;
                     html += `<div class="code">${escapeHtml(info.missing.join(', '))}\n\n${escapeHtml(info.sql || '')}</div>`;
+                } else if (info.status === 'unverified') {
+                    html += `<div class="status-msg loading">${label}: erreichbar (${info.columns} lesbare Spalten, ${rows} Zeilen)${note}<br>`
+                        + `Der Key darf die Tabellenstruktur nicht auslesen. ${info.missing.length} Spalte(n) waren in der Stichprobe nicht sichtbar — `
+                        + `das kann heissen, dass sie fehlen, oder nur, dass der Key sie nicht lesen darf. `
+                        + `<b>Beim Upload werden sie trotzdem mitgeschickt</b> und nur weggelassen, wenn die Datenbank sie wirklich ablehnt.</div>`;
+                    html += `<div class="code">Nicht sichtbar: ${escapeHtml(info.missing.join(', '))}\n\nNur falls sie tatsaechlich fehlen:\n${escapeHtml(info.sql || '')}</div>`;
                 } else {
                     html += `<div class="status-msg success">${label}: OK — ${info.columns} Spalten, ${rows} Zeilen${note}</div>`;
                 }

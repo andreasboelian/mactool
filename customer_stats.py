@@ -490,11 +490,29 @@ def build_missing_users_row(username: str, device: str, server: str) -> dict:
     }
 
 
-def _filter_columns(row: dict, available: set[str]) -> dict:
-    """Drop keys the target table doesn't have (unknown schema = send all)."""
-    if not available:
-        return row
-    return {k: v for k, v in row.items() if k in available}
+def _filter_columns(rows: list[dict], api: SupabaseRest, table: str) -> list[dict]:
+    """Drop keys the target table really doesn't have.
+
+    Only the OpenAPI spec counts as a schema. When the key may not introspect,
+    the fallback is a sampled row — and a column missing there may simply be one
+    the key cannot read (column-level SELECT rights). Dropping fields based on
+    that would silently strip real values such as `device` or `serverzuordnung`,
+    so in that case everything is sent and `_write` removes a column only if the
+    server actually rejects it.
+    """
+    available, source = api.columns_with_source(table)
+    if source != "openapi" or not available:
+        if source == "row":
+            logger.info(
+                f"'{table}': Schema nicht auslesbar (Key darf nicht introspizieren) — "
+                f"es werden alle Felder gesendet"
+            )
+        return rows
+
+    unknown = set(rows[0]) - available if rows else set()
+    if unknown:
+        logger.info(f"'{table}': Spalten nicht vorhanden, werden weggelassen: {sorted(unknown)}")
+    return [{k: v for k, v in row.items() if k in available} for row in rows]
 
 
 def _missing_rows_still_needed(
@@ -629,8 +647,7 @@ def run_customer_stats_upload(
     if stats_api.configured:
         table = config.customer_stats_table
         try:
-            available = stats_api.columns(table)
-            payload = [_filter_columns(row, available) for row in stats_rows]
+            payload = _filter_columns(stats_rows, stats_api, table)
             outcome = stats_api.upsert_many(table, payload, on_conflict="session_id")
             result["statistik"] = {
                 "status": "success" if not outcome["failed"] else "partial",
@@ -650,17 +667,13 @@ def run_customer_stats_upload(
     if users_api.configured:
         table = config.customer_users_table
         try:
-            available = users_api.columns(table)
-
             session_ids = [row["session_id"] for row in users_rows if row.get("session_id")]
             existing = users_api.select_existing(table, "session_id", session_ids)
             new_rows = [r for r in users_rows if r.get("session_id") not in existing]
 
             pending_missing = _missing_rows_still_needed(users_api, table, missing_rows)
 
-            payload = [
-                _filter_columns(row, available) for row in new_rows + pending_missing
-            ]
+            payload = _filter_columns(new_rows + pending_missing, users_api, table)
             outcome = users_api.insert_many(table, payload)
             result["users"] = {
                 "status": "success" if not outcome["failed"] else "partial",

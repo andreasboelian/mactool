@@ -12,6 +12,7 @@ regularly failed halfway through.
 
 import json
 import logging
+import re
 import time
 
 import requests
@@ -27,6 +28,35 @@ MAX_RETRIES = 3
 
 class SupabaseRestError(RuntimeError):
     """A PostgREST request failed."""
+
+
+def _unknown_column(error_text: str, row_keys: set[str], table: str) -> str | None:
+    """Extract the column name from a "column does not exist" error.
+
+    PostgREST answers PGRST204 ("Could not find the 'x' column of 'y' in the
+    schema cache"), PostgreSQL answers 42703 ("column y.x does not exist").
+    Anything else is not a column problem.
+    """
+    lowered = error_text.lower()
+    is_column_error = (
+        "pgrst204" in lowered
+        or "42703" in lowered
+        or ("column" in lowered and ("does not exist" in lowered or "could not find" in lowered))
+    )
+    if not is_column_error:
+        return None
+
+    candidates = re.findall(r"'([^']+)'", error_text)
+    candidates += [c.split(".")[-1] for c in re.findall(r"column ([\w.]+) does not exist", error_text)]
+
+    # Prefer a candidate that is actually a key we sent
+    for candidate in candidates:
+        if candidate in row_keys:
+            return candidate
+    for candidate in candidates:
+        if candidate != table:
+            return candidate
+    return None
 
 
 class SupabaseRest:
@@ -108,12 +138,17 @@ class SupabaseRest:
 
     # ── Schema ────────────────────────────────────────────────────────
 
-    def columns(self, table: str) -> set[str]:
-        """Discover the columns of a table.
+    def columns_with_source(self, table: str) -> tuple[set[str], str]:
+        """Discover the columns of a table and say how reliable the answer is.
 
-        Tries the OpenAPI spec first (works for empty tables), then falls back to
-        reading one row. Returns an empty set when neither works — callers treat
-        that as "unknown schema, send everything".
+        Returns (columns, source):
+
+        * ``openapi`` — read from the OpenAPI spec. Authoritative: this is the
+          real table definition.
+        * ``row`` — derived from the keys of one sampled row. **Not** a schema:
+          a key may be absent because the role lacks column-level SELECT rights
+          even though the column exists. Never use this to drop payload fields.
+        * ``unknown`` — nothing worked.
         """
         try:
             response = self._request("GET", f"{self.base}/", retries=1)
@@ -121,7 +156,7 @@ class SupabaseRest:
             if table in definitions:
                 cols = set(definitions[table].get("properties", {}).keys())
                 if cols:
-                    return cols
+                    return cols, "openapi"
         except Exception as e:
             logger.debug(f"OpenAPI column discovery failed for '{table}': {e}")
 
@@ -131,20 +166,28 @@ class SupabaseRest:
             )
             rows = response.json()
             if rows:
-                return set(rows[0].keys())
+                return set(rows[0].keys()), "row"
         except Exception as e:
             logger.debug(f"Row-based column discovery failed for '{table}': {e}")
 
-        return set()
+        return set(), "unknown"
+
+    def columns(self, table: str) -> set[str]:
+        """Discover the columns of a table (see columns_with_source)."""
+        return self.columns_with_source(table)[0]
 
     def count(self, table: str) -> int | None:
-        """Return the row count of a table, or None when unavailable."""
+        """Return an estimated row count, or None when unavailable.
+
+        Deliberately `count=planned`: an exact count on a table with millions of
+        rows makes PostgREST time out with a 500.
+        """
         try:
             response = self._request(
                 "GET",
                 f"{self.base}/{table}",
                 params={"select": "*", "limit": 1},
-                headers={"Prefer": "count=exact", "Range-Unit": "items", "Range": "0-0"},
+                headers={"Prefer": "count=planned", "Range-Unit": "items", "Range": "0-0"},
                 retries=1,
             )
             content_range = response.headers.get("content-range", "")
@@ -201,37 +244,64 @@ class SupabaseRest:
     def _write(
         self, table: str, rows: list[dict], params: dict, prefer: str, batch_size: int
     ) -> dict:
-        """Write rows in batches; fall back to single rows when a batch fails.
+        """Write rows in batches, recovering from missing columns and bad rows.
 
-        A failing batch usually means one bad row (a value that violates a
-        constraint). Retrying row by row keeps the remaining rows of that batch
-        instead of losing all of them.
+        Columns are never dropped up front — a column can be invisible to the
+        key while still existing (column-level SELECT rights), and dropping it
+        would silently lose data. Instead a column is removed only when the
+        server actually rejects it, and then for all remaining batches too.
+
+        If a batch still fails, it is retried row by row so one bad row does not
+        take the other 99 with it.
         """
         written = 0
         errors: list[str] = []
+        removed: set[str] = set()
+
+        def strip(batch: list[dict]) -> list[dict]:
+            if not removed:
+                return batch
+            return [{k: v for k, v in row.items() if k not in removed} for row in batch]
 
         for i in range(0, len(rows), batch_size):
             batch = rows[i : i + batch_size]
-            try:
-                self._write_batch(table, batch, params, prefer)
-                written += len(batch)
-                continue
-            except Exception as e:
-                logger.warning(
-                    f"Batch write to '{table}' failed ({len(batch)} rows), "
-                    f"retrying row by row: {e}"
-                )
 
-            for row in batch:
+            while True:
+                current = strip(batch)
                 try:
-                    self._write_batch(table, [row], params, prefer)
-                    written += 1
+                    self._write_batch(table, current, params, prefer)
+                    written += len(current)
+                    break
                 except Exception as e:
-                    message = str(e)[:200]
-                    errors.append(message)
-                    logger.error(f"Row write to '{table}' failed: {message}")
+                    bad_column = _unknown_column(
+                        str(e), set(current[0]) if current else set(), table
+                    )
+                    if bad_column and bad_column not in removed and len(removed) < 30:
+                        removed.add(bad_column)
+                        logger.warning(
+                            f"'{table}' hat keine Spalte '{bad_column}' — "
+                            f"wird für diesen Upload weggelassen"
+                        )
+                        continue
 
-        return {"written": written, "failed": len(errors), "errors": errors[:10]}
+                    logger.warning(
+                        f"Batch write to '{table}' failed ({len(current)} rows), "
+                        f"retrying row by row: {e}"
+                    )
+                    for row in current:
+                        try:
+                            self._write_batch(table, [row], params, prefer)
+                            written += 1
+                        except Exception as row_error:
+                            message = str(row_error)[:200]
+                            errors.append(message)
+                            logger.error(f"Row write to '{table}' failed: {message}")
+                    break
+
+        result = {"written": written, "failed": len(errors), "errors": errors[:10]}
+        if removed:
+            result["removed_columns"] = sorted(removed)
+        return result
 
     def insert_many(self, table: str, rows: list[dict], batch_size: int = 100) -> dict:
         """Plain INSERT (no conflict handling)."""
@@ -298,7 +368,7 @@ def describe_target(
             "error": "URL oder Key fehlt",
         }
 
-    columns = api.columns(table)
+    columns, source = api.columns_with_source(table)
     if not columns:
         return {
             "status": "error",
@@ -314,13 +384,17 @@ def describe_target(
         "columns": len(columns),
         "rows": api.count(table),
         "missing": [],
+        "verified": source == "openapi",
     }
 
     if expected:
         missing = {name: t for name, t in expected.items() if name not in columns}
         result["missing"] = list(missing)
         if missing:
-            result["status"] = "incomplete"
+            # Only the OpenAPI spec is a real schema. A sampled row just shows
+            # what this key may read — a column can exist and still be absent
+            # there, so we must not call it missing.
+            result["status"] = "incomplete" if source == "openapi" else "unverified"
             result["sql"] = build_alter_sql(table, missing)
 
     if unique_column:
