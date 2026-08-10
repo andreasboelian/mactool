@@ -131,6 +131,29 @@ Getestet mit einem Mock, der genau diese Konstellation nachbaut (OpenAPI 401, St
 15 von 19 Spalten): alle vier Felder kommen jetzt mit echten Werten an; eine tatsächlich
 fehlende Spalte wird entfernt, ohne die übrigen zu verlieren.
 
+### Nachtrag v1.0.111 — Ziel B lief auf mac17 nie
+
+Befund am 10.08.: Ziel A (statistik) lieferte von mac17 um 08:10 einen vollstaendigen Lauf
+mit 17.447 Zeilen inkl. der Session von 08:04 desselben Morgens — vorher waren es ~100
+Zeilen pro Tag (Altskript, das regelmaessig frueh abbrach). Ziel B (users) dagegen hatte
+von den 40 neuesten mac17-Sessions **keine einzige**; auch der manuelle Lauf am 06.08. hat
+dort nichts geschrieben.
+
+Ursache: auf mac17 war nur `customer_stats_key` hinterlegt, `customer_users_key` nicht.
+Ein Ziel ohne URL/Key bekam den Status `not_configured` und wurde uebersprungen — der
+Gesamtlauf meldete aber `success`, weil nur der Fall „beide Ziele unkonfiguriert" gesondert
+behandelt wurde. Damit war der tote Zweig nirgends sichtbar, und schlimmer: `success` haette
+das Altskript deaktiviert, obwohl es das einzige war, das users noch befuellte.
+
+Nicht die Ursache (geprueft): die Dublettenpruefung gegen die grosse users-Tabelle
+antwortet in 0,18s fuer 100 IDs.
+
+Behoben: neuer Status `incomplete`; Auto-Deaktivierung des Altskripts nur bei echtem
+`success` **und** eingeschaltetem Toggle; Dashboard zeigt je Ziel dauerhaft „Kein Key
+hinterlegt" bzw. Zeitpunkt und Zeilenzahl des letzten Laufs; Ergebnis je Ziel landet in
+`run_state.json`. Zusaetzlich erkennt die LaunchAgent-Suche das Skript jetzt auch in einem
+Shell-Aufruf — das erklaert, warum das alte plist auf mac17 weiterlief.
+
 ### Offen (nur auf Wunsch)
 - Commit + Tag v1.0.109 + Push
 - Pro Mac: Keys eintragen, Toggle „Statistik (Kunde)" einschalten

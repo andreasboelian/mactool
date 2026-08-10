@@ -23,16 +23,29 @@ def _load() -> dict:
     return {}
 
 
-def record_run(name: str, status: str, summary: str = "", trigger: str = "auto") -> None:
-    """Store the outcome of a run under `name`."""
+def record_run(
+    name: str,
+    status: str,
+    summary: str = "",
+    trigger: str = "auto",
+    detail: dict | None = None,
+) -> None:
+    """Store the outcome of a run under `name`.
+
+    `detail` holds the per-target outcome so the dashboard can show a dead
+    target permanently instead of only in the message right after a run.
+    """
     try:
         data = _load()
-        data[name] = {
+        entry = {
             "at": datetime.now().isoformat(timespec="seconds"),
             "status": status,
             "summary": summary[:300],
             "trigger": trigger,
         }
+        if detail:
+            entry["detail"] = detail
+        data[name] = entry
         STATE_FILE.write_text(json.dumps(data, indent=2))
     except Exception as e:
         logger.warning(f"Could not write run state for '{name}': {e}")

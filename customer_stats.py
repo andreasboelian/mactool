@@ -697,24 +697,47 @@ def run_customer_stats_upload(
     elif all(status == "not_configured" for status in statuses):
         result["status"] = "not_configured"
         logger.warning("Statistik (Kunde): Kein Ziel konfiguriert (URL/Key fehlen)")
+    elif "not_configured" in statuses:
+        # One target works, the other has no URL/key. Reporting that as success
+        # would hide a dead target — and would retire the legacy script that is
+        # still the only thing feeding it.
+        result["status"] = "incomplete"
+        missing = "statistik" if statuses[0] == "not_configured" else "users"
+        logger.warning(
+            f"Statistik (Kunde): Ziel '{missing}' ist nicht konfiguriert (URL/Key fehlen) "
+            f"und wurde übersprungen — dorthin fliessen keine Daten"
+        )
 
     summary = (
         f"{result['sessions']} Sessions, "
         f"statistik={result['statistik'].get('written', result['statistik']['status'])}, "
         f"users={result['users'].get('written', result['users']['status'])}"
     )
-    run_state.record_run("customer_stats", result["status"], summary, trigger)
+    run_state.record_run(
+        "customer_stats",
+        result["status"],
+        summary,
+        trigger,
+        detail={"statistik": result["statistik"], "users": result["users"]},
+    )
 
-    # Only retire the legacy LaunchAgent once our own upload actually worked
+    # Only retire the legacy LaunchAgent when our upload fully replaces it:
+    # every target configured, none failed, and the scheduled run switched on.
     if result["status"] == "success" and config.auto_disable_legacy_upload:
-        try:
-            from legacy_upload import auto_disable_after_success
+        if not config.customer_stats_enabled:
+            logger.info(
+                "Altes Upload-Skript bleibt aktiv: 'Statistik (Kunde)' ist ausgeschaltet, "
+                "die automatischen Läufe würden also niemanden ersetzen"
+            )
+        else:
+            try:
+                from legacy_upload import auto_disable_after_success
 
-            legacy = auto_disable_after_success()
-            if legacy.get("disabled"):
-                result["legacy_upload"] = legacy
-        except Exception as e:
-            logger.warning(f"Altes Upload-Skript konnte nicht deaktiviert werden: {e}")
+                legacy = auto_disable_after_success()
+                if legacy.get("disabled"):
+                    result["legacy_upload"] = legacy
+            except Exception as e:
+                logger.warning(f"Altes Upload-Skript konnte nicht deaktiviert werden: {e}")
 
     logger.info(f"Statistik (Kunde): Fertig — {summary}")
     logger.info("=" * 60)

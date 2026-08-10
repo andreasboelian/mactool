@@ -325,6 +325,7 @@ async def get_dashboard():
                     <div class="row-actions">
                         <button class="btn btn-small" onclick="testTarget('customer_stats', 'cust-stats-test')">Ziel A testen</button>
                     </div>
+                    <div id="cust-stats-state"></div>
                     <div id="cust-stats-test"></div>
 
                     <div class="fields">
@@ -335,6 +336,7 @@ async def get_dashboard():
                     <div class="row-actions">
                         <button class="btn btn-small" onclick="testTarget('customer_users', 'cust-users-test')">Ziel B testen</button>
                     </div>
+                    <div id="cust-users-state"></div>
                     <div id="cust-users-test"></div>
 
                     <div class="row-actions">
@@ -895,6 +897,39 @@ async def get_dashboard():
                 }
             }
 
+            // Permanent per-target state. A target without a key is skipped
+            // silently during the upload — that must be visible at a glance,
+            // not only in the message right after a run.
+            function renderTargetState(elementId, label, target, outcome, lastRun) {
+                const el = document.getElementById(elementId);
+                if (!el) return;
+
+                if (!target.url || !target.key_masked) {
+                    const what = !target.url ? 'Keine URL' : 'Kein Key';
+                    el.innerHTML = `<div class="status-msg error">${label}: ${what} hinterlegt — `
+                        + `dieses Ziel wird bei jedem Upload übersprungen, es kommen dort keine Daten an.</div>`;
+                    return;
+                }
+                if (!outcome) {
+                    el.innerHTML = `<div class="hint">${label}: konfiguriert (${escapeHtml(target.table)}), noch kein Lauf protokolliert.</div>`;
+                    return;
+                }
+
+                const when = lastRun && lastRun.at ? lastRun.at.replace('T', ' ') : '?';
+                if (outcome.status === 'not_configured') {
+                    el.innerHTML = `<div class="status-msg error">${label}: wurde beim letzten Lauf (${when}) übersprungen — URL oder Key fehlten.</div>`;
+                } else if (outcome.status === 'error') {
+                    el.innerHTML = `<div class="status-msg error">${label}: letzter Lauf ${when} fehlgeschlagen — ${escapeHtml(outcome.error || '')}</div>`;
+                } else {
+                    const extra = outcome.skipped_existing !== undefined
+                        ? `, ${outcome.skipped_existing} bereits vorhanden` : '';
+                    const failed = outcome.failed ? `, ${outcome.failed} fehlgeschlagen` : '';
+                    const cls = (outcome.status === 'success' && !outcome.failed) ? 'success' : 'error';
+                    el.innerHTML = `<div class="status-msg ${cls}">${label}: ${when} — `
+                        + `${outcome.written} Zeilen geschrieben${extra}${failed}</div>`;
+                }
+            }
+
             let statsSettings = null;
 
             async function loadStatsSettings() {
@@ -921,6 +956,12 @@ async def get_dashboard():
                     setKeyField('cust-users-key', data.customer.users.key_masked);
                     setValue('cust-users-table', data.customer.users.table);
                     document.getElementById('cust-auto-disable').checked = !!data.customer.auto_disable_legacy_upload;
+
+                    const lastRun = (data.last_runs || {}).customer_stats;
+                    renderTargetState('cust-stats-state', 'Ziel A', data.customer.stats,
+                                      (lastRun && lastRun.detail || {}).statistik, lastRun);
+                    renderTargetState('cust-users-state', 'Ziel B', data.customer.users,
+                                      (lastRun && lastRun.detail || {}).users, lastRun);
 
                     updateSourceHint();
                     renderLegacy(data.legacy_upload);

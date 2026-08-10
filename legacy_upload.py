@@ -48,7 +48,13 @@ def _read_plist(path: Path) -> dict | None:
 
 
 def _upload_script_in(plist: dict) -> str | None:
-    """Return the upload script this agent starts, or None."""
+    """Return the upload script this agent starts, or None.
+
+    An entry may be the script path itself, or a shell command that contains it
+    (`/bin/sh -c "cd ~/Downloads && python3 upload-mac17.py"`), so each entry is
+    also split into tokens. A match still requires a real `upload-*.py` file
+    name — nothing else in ~/Library/LaunchAgents is ever touched.
+    """
     candidates: list[str] = []
 
     program = plist.get("Program")
@@ -62,6 +68,12 @@ def _upload_script_in(plist: dict) -> str | None:
     for candidate in candidates:
         if UPLOAD_SCRIPT_RE.match(Path(candidate).name):
             return candidate
+
+    # Second pass: the script may sit inside a shell command string
+    for candidate in candidates:
+        for token in re.split(r"[\s'\";|&]+", candidate):
+            if token.endswith(".py") and UPLOAD_SCRIPT_RE.match(Path(token).name):
+                return token
     return None
 
 

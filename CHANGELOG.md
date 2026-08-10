@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.0.111 — 2026-08-10
+- **Fix: ein Ziel ohne URL/Key wurde stumm übersprungen und der Lauf trotzdem als
+  „success" gemeldet.** Auf mac17 war nur Ziel A (statistik) hinterlegt — Ziel B (users)
+  bekam dadurch seit dem Umstieg nichts, ohne dass es irgendwo sichtbar war
+- Neuer Status `incomplete`: mindestens ein Ziel läuft, ein anderes ist nicht konfiguriert
+- Das alte Upload-LaunchAgent wird nur noch deaktiviert, wenn der Lauf wirklich `success`
+  ist (also **alle** Ziele konfiguriert und fehlerfrei) **und** „Statistik (Kunde)"
+  eingeschaltet ist — sonst würde das Altskript abgeschaltet, ohne dass etwas es ersetzt
+- Dashboard zeigt je Ziel dauerhaft den Zustand an: „Kein Key hinterlegt — wird
+  übersprungen", bzw. Zeitpunkt und Zeilenzahl des letzten Laufs. Bisher stand das nur in
+  der Meldung direkt nach einem Lauf
+- Das Ergebnis je Ziel wird in `run_state.json` mitprotokolliert
+- LaunchAgent-Erkennung findet das Skript jetzt auch, wenn es in einem Shell-Aufruf steckt
+  (`/bin/sh -c "cd ... && python3 upload-mac17.py"`) — vorher wurde nur ein direkter
+  Skriptpfad erkannt. Ein echter `upload-*.py`-Dateiname bleibt Voraussetzung
+
 ## v1.0.110 — 2026-08-06
 - **Fix: keine stillen Datenverluste mehr beim Kunden-Upload.** Die Spaltenerkennung fiel,
   wenn ein Key die Tabellenstruktur nicht auslesen darf (anon-Key, OpenAPI antwortet 401),
