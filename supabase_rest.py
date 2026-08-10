@@ -30,6 +30,20 @@ class SupabaseRestError(RuntimeError):
     """A PostgREST request failed."""
 
 
+def _is_permission_error(error_text: str) -> bool:
+    """True for "you may not write here" — a property of the table, not the row.
+
+    Retrying such an error row by row is pointless: every row fails identically.
+    """
+    lowered = error_text.lower()
+    return (
+        "42501" in lowered
+        or "permission denied" in lowered
+        or "http 401" in lowered
+        or "http 403" in lowered
+    )
+
+
 def _unknown_column(error_text: str, row_keys: set[str], table: str) -> str | None:
     """Extract the column name from a "column does not exist" error.
 
@@ -273,6 +287,20 @@ class SupabaseRest:
                     written += len(current)
                     break
                 except Exception as e:
+                    if _is_permission_error(str(e)):
+                        # Missing write rights apply to the whole table. The old
+                        # code retried all 946 rows individually to learn this.
+                        logger.error(
+                            f"Keine Schreibrechte auf '{table}' — Upload abgebrochen: {e}"
+                        )
+                        return {
+                            "written": written,
+                            "failed": len(rows) - written,
+                            "errors": [str(e)[:300]],
+                            "aborted": "no_write_permission",
+                            "removed_columns": sorted(removed),
+                        }
+
                     bad_column = _unknown_column(
                         str(e), set(current[0]) if current else set(), table
                     )
@@ -293,6 +321,18 @@ class SupabaseRest:
                             self._write_batch(table, [row], params, prefer)
                             written += 1
                         except Exception as row_error:
+                            if _is_permission_error(str(row_error)):
+                                logger.error(
+                                    f"Keine Schreibrechte auf '{table}' — Upload abgebrochen: "
+                                    f"{row_error}"
+                                )
+                                return {
+                                    "written": written,
+                                    "failed": len(rows) - written,
+                                    "errors": [str(row_error)[:300]],
+                                    "aborted": "no_write_permission",
+                                    "removed_columns": sorted(removed),
+                                }
                             message = str(row_error)[:200]
                             errors.append(message)
                             logger.error(f"Row write to '{table}' failed: {message}")

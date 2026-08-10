@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.0.112 — 2026-08-10
+- **Fehlende Schreibrechte brechen den Upload sofort ab statt jede Zeile einzeln zu
+  versuchen.** Auf mac17 lief Ziel B in 946 Einzelversuche mit identischem Fehler
+  (`42501 permission denied for view users`) — jetzt genügt ein Request für die Erkenntnis
+- Dashboard benennt den Fall im Klartext: „keine Schreibrechte auf 'users'" plus die drei
+  Auswege (INSERT-Recht vergeben, Key mit Schreibrecht, oder echte Tabelle statt View)
+- Der Verbindungstest sagt jetzt dazu, dass er **nur den Lesezugriff** prüft — Schreibrechte
+  zeigen sich erst beim Upload
+- Ein abgebrochenes Ziel gilt als `error`, nicht mehr als `partial`
+
 ## v1.0.111 — 2026-08-10
 - **Fix: ein Ziel ohne URL/Key wurde stumm übersprungen und der Lauf trotzdem als
   „success" gemeldet.** Auf mac17 war nur Ziel A (statistik) hinterlegt — Ziel B (users)

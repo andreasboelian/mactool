@@ -154,6 +154,26 @@ hinterlegt" bzw. Zeitpunkt und Zeilenzahl des letzten Laufs; Ergebnis je Ziel la
 `run_state.json`. Zusaetzlich erkennt die LaunchAgent-Suche das Skript jetzt auch in einem
 Shell-Aufruf — das erklaert, warum das alte plist auf mac17 weiterlief.
 
+### Nachtrag v1.0.112 — die tatsaechliche Ursache
+
+Das Log von mac17 hat es beantwortet, nachdem zwei Hypothesen von mir falsch waren
+(erst „Key fehlt" — der Key war da; dann „uneinheitliche Zeilen" — device/start_time sind
+zu 100% gefuellt):
+
+    HTTP 401: {"code":"42501","message":"permission denied for view users"}
+
+`users` ist eine **View**, und der anon-Key hat darauf kein INSERT-Recht. Dazu passend
+meldete derselbe Lauf `removed_columns: device, serverzuordnung, total_scraped,
+total_watched` — die View stellt wirklich nur 15 Spalten bereit, es war also keine
+Rechtefrage beim Lesen, sondern die View ist tatsaechlich schmaler.
+
+Ziel A funktioniert, weil dort ein service_role-Key auf eine echte Tabelle schreibt.
+
+Das ist ein serverseitiges Rechte-/Schema-Thema in der Kunden-Supabase, kein Mactool-Bug.
+Behoben wurde die Diagnostizierbarkeit: Rechte-Fehler brechen sofort ab (1 statt 946
+Requests), das Dashboard benennt den Fall samt Auswegen, und der Verbindungstest sagt
+explizit, dass er nur Lesezugriff prueft.
+
 ### Offen (nur auf Wunsch)
 - Commit + Tag v1.0.109 + Push
 - Pro Mac: Keys eintragen, Toggle „Statistik (Kunde)" einschalten

@@ -916,6 +916,19 @@ async def get_dashboard():
                 }
 
                 const when = lastRun && lastRun.at ? lastRun.at.replace('T', ' ') : '?';
+                if (outcome.aborted === 'no_write_permission') {
+                    el.innerHTML = `<div class="status-msg error">${label}: <b>keine Schreibrechte auf '${escapeHtml(outcome.table || target.table)}'</b> `
+                        + `(${when}) — es wurde nichts geschrieben.<br>`
+                        + `Der Key darf lesen, aber nicht schreiben. Entweder INSERT-Recht für diesen Key vergeben, `
+                        + `einen Key mit Schreibrecht (service_role) eintragen, oder als Ziel die echte Tabelle `
+                        + `statt einer View angeben.</div>`
+                        + `<div class="code">${escapeHtml((outcome.errors || [])[0] || '')}</div>`;
+                    if (outcome.removed_columns && outcome.removed_columns.length) {
+                        el.innerHTML += `<div class="hint warn">Ausserdem kennt '${escapeHtml(outcome.table || target.table)}' diese Spalten nicht, `
+                            + `sie wurden weggelassen: ${escapeHtml(outcome.removed_columns.join(', '))}</div>`;
+                    }
+                    return;
+                }
                 if (outcome.status === 'not_configured') {
                     el.innerHTML = `<div class="status-msg error">${label}: wurde beim letzten Lauf (${when}) übersprungen — URL oder Key fehlten.</div>`;
                 } else if (outcome.status === 'error') {
@@ -1064,6 +1077,8 @@ async def get_dashboard():
                 } else {
                     html += `<div class="status-msg success">${label}: OK — ${info.columns} Spalten, ${rows} Zeilen${note}</div>`;
                 }
+                html += `<div class="hint">Der Test prüft nur den Lesezugriff — ob der Key auch schreiben darf, `
+                    + `zeigt sich erst beim Upload (siehe Zeile darüber nach einem Lauf).</div>`;
                 if (info.hint) html += `<div class="code">${escapeHtml(info.hint)}</div>`;
                 return html;
             }

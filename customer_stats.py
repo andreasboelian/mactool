@@ -676,7 +676,8 @@ def run_customer_stats_upload(
             payload = _filter_columns(new_rows + pending_missing, users_api, table)
             outcome = users_api.insert_many(table, payload)
             result["users"] = {
-                "status": "success" if not outcome["failed"] else "partial",
+                "status": "error" if outcome.get("aborted") else
+                          ("success" if not outcome["failed"] else "partial"),
                 "table": table,
                 "skipped_existing": len(users_rows) - len(new_rows),
                 "missing_written": len(pending_missing),
