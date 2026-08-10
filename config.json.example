@@ -27,8 +27,10 @@
   "customer_stats_url": "https://eeshaewrbrqipsvtlyng.supabase.co",
   "customer_stats_key": "",
   "customer_stats_table": "statistik",
+  "customer_stats_schema": "public",
   "customer_users_url": "https://apltfvenhqwnidmuptdp.supabase.co",
   "customer_users_key": "",
   "customer_users_table": "users",
+  "customer_users_schema": "public",
   "auto_disable_legacy_upload": true
 }

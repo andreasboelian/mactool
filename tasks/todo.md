@@ -174,6 +174,30 @@ Behoben wurde die Diagnostizierbarkeit: Rechte-Fehler brechen sofort ab (1 statt
 Requests), das Dashboard benennt den Fall samt Auswegen, und der Verbindungstest sagt
 explizit, dass er nur Lesezugriff prueft.
 
+### Nachtrag v1.0.113 — die wirkliche Ursache: falsches Schema
+
+Die Rechteabfrage in der Kunden-Supabase zeigte zwei Relationen namens `users`:
+
+    api.users    -> anon: SELECT                       (schmale View, 15 Spalten)
+    public.users -> anon: UPDATE, DELETE, TRUNCATE, .. (echte Tabelle, 21 Spalten)
+
+PostgREST loest eine Anfrage ohne Schema-Angabe gegen das zuerst freigegebene Schema auf —
+hier `api`. `supabase-py`, das im Altskript steckt, sendet bei jedem Request
+`Accept-Profile`/`Content-Profile: public` und landet deshalb auf der echten Tabelle.
+Unser schlanker REST-Helper sendete diese Header nicht.
+
+Verifiziert per Direktabfrage: ohne Header 15 Spalten, mit `Accept-Profile: public` 21 —
+und die Differenz ist exakt `device, email, serverzuordnung, total_scraped, total_watched,
+userid`.
+
+Damit loest sich auch der Nachtrag zu v1.0.110 auf: die vier Spalten waren nie eine Frage
+von Leserechten, sie existieren in `api.users` schlicht nicht. Der damalige Fix (nicht auf
+Basis unsicherer Erkennung filtern) war trotzdem richtig und hat verhindert, dass Felder
+still verloren gehen.
+
+Behoben: beide Profile-Header werden gesendet, Schema je Ziel konfigurierbar (Default
+`public`), Verbindungstest zeigt `schema.tabelle`.
+
 ### Offen (nur auf Wunsch)
 - Commit + Tag v1.0.109 + Push
 - Pro Mac: Keys eintragen, Toggle „Statistik (Kunde)" einschalten

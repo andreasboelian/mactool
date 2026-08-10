@@ -25,6 +25,10 @@ RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 DEFAULT_TIMEOUT = 30
 MAX_RETRIES = 3
 
+# PostgREST resolves an unqualified request against the first exposed schema.
+# Everything the uploads touch lives in `public`.
+DEFAULT_SCHEMA = "public"
+
 
 class SupabaseRestError(RuntimeError):
     """A PostgREST request failed."""
@@ -76,23 +80,41 @@ def _unknown_column(error_text: str, row_keys: set[str], table: str) -> str | No
 class SupabaseRest:
     """Tiny PostgREST wrapper with batching and retry/backoff."""
 
-    def __init__(self, url: str, key: str, timeout: int = DEFAULT_TIMEOUT):
+    def __init__(
+        self,
+        url: str,
+        key: str,
+        timeout: int = DEFAULT_TIMEOUT,
+        schema: str = DEFAULT_SCHEMA,
+    ):
         self.root = (url or "").strip().rstrip("/")
         self.base = f"{self.root}/rest/v1"
         self.key = (key or "").strip()
         self.timeout = timeout
+        self.schema = (schema or DEFAULT_SCHEMA).strip()
 
     @property
     def configured(self) -> bool:
         """True when both URL and key are set."""
         return bool(self.root and self.key)
 
-    def _headers(self, extra: dict | None = None) -> dict:
+    def _headers(self, extra: dict | None = None, method: str = "GET") -> dict:
         headers = {
             "apikey": self.key,
             "Authorization": f"Bearer {self.key}",
             "Content-Type": "application/json",
         }
+
+        # Without these, PostgREST uses whichever schema it exposes first. That
+        # is not necessarily `public` — a project may expose a narrow read-only
+        # `api` schema ahead of it, and writes would then hit the wrong relation.
+        # supabase-py sends the same headers, so this matches the client the
+        # legacy upload script used.
+        if method in ("GET", "HEAD"):
+            headers["Accept-Profile"] = self.schema
+        else:
+            headers["Content-Profile"] = self.schema
+
         if extra:
             headers.update(extra)
         return headers
@@ -115,7 +137,7 @@ class SupabaseRest:
                 response = requests.request(
                     method,
                     url,
-                    headers=self._headers(headers),
+                    headers=self._headers(headers, method),
                     params=params,
                     data=json.dumps(payload) if payload is not None else None,
                     timeout=self.timeout,
@@ -395,12 +417,13 @@ def describe_target(
     table: str,
     expected: dict[str, str] | None = None,
     unique_column: str | None = None,
+    schema: str = DEFAULT_SCHEMA,
 ) -> dict:
     """Check whether a target table is reachable and which columns are missing."""
     if not table:
         return {"status": "error", "error": "Kein Tabellenname gesetzt"}
 
-    api = SupabaseRest(url, key)
+    api = SupabaseRest(url, key, schema=schema)
     if not api.configured:
         return {
             "status": "not_configured",
@@ -421,6 +444,7 @@ def describe_target(
     result = {
         "status": "ok",
         "table": table,
+        "schema": api.schema,
         "columns": len(columns),
         "rows": api.count(table),
         "missing": [],

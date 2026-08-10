@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.0.113 — 2026-08-10
+- **Fix: der Kunden-Upload schrieb ins falsche Schema.** PostgREST löst eine Anfrage ohne
+  Schema-Angabe gegen das *zuerst freigegebene* Schema auf. In der Kunden-Supabase ist das
+  `api` — dort liegt eine schmale Lese-View `api.users` mit 15 Spalten, auf die `anon` nur
+  SELECT hat. Die echte Tabelle ist `public.users` mit 21 Spalten
+- `supabase-py` (das Altskript) sendet `Accept-Profile`/`Content-Profile: public` bei jedem
+  Request, unser REST-Helper tat das nicht — daher `42501 permission denied for view users`
+- Beide Header werden jetzt gesendet, Schema je Ziel einstellbar
+  (`customer_stats_schema` / `customer_users_schema`, Default `public`)
+- Damit klärt sich auch die Spalten-Frage aus v1.0.110 endgültig: `device`, `total_watched`,
+  `total_scraped` und `serverzuordnung` fehlen nicht in der Tabelle, sondern nur in der View
+- Verbindungstest zeigt das Schema mit an (`public.users` statt nur `users`)
+
 ## v1.0.112 — 2026-08-10
 - **Fehlende Schreibrechte brechen den Upload sofort ab statt jede Zeile einzeln zu
   versuchen.** Auf mac17 lief Ziel B in 946 Einzelversuche mit identischem Fehler

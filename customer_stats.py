@@ -643,7 +643,10 @@ def run_customer_stats_upload(
         return result
 
     # ── Target A: raw statistik (upsert) ──
-    stats_api = SupabaseRest(config.customer_stats_url, config.customer_stats_key)
+    stats_api = SupabaseRest(
+        config.customer_stats_url, config.customer_stats_key,
+        schema=config.customer_stats_schema,
+    )
     if stats_api.configured:
         table = config.customer_stats_table
         try:
@@ -663,7 +666,10 @@ def run_customer_stats_upload(
             result["statistik"] = {"status": "error", "table": table, "error": str(e)[:400]}
 
     # ── Target B: beautified users (insert) ──
-    users_api = SupabaseRest(config.customer_users_url, config.customer_users_key)
+    users_api = SupabaseRest(
+        config.customer_users_url, config.customer_users_key,
+        schema=config.customer_users_schema,
+    )
     if users_api.configured:
         table = config.customer_users_table
         try:
@@ -756,6 +762,7 @@ def check_customer_target(target: str) -> dict:
             config.customer_stats_table,
             STATS_SCHEMA,
             unique_column="session_id",
+            schema=config.customer_stats_schema,
         )
     if target == "customer_users":
         return describe_target(
@@ -763,5 +770,6 @@ def check_customer_target(target: str) -> dict:
             config.customer_users_key,
             config.customer_users_table,
             USERS_SCHEMA,
+            schema=config.customer_users_schema,
         )
     raise ValueError(f"Unbekanntes Ziel: {target}")

@@ -51,9 +51,13 @@ class AppConfig:
     customer_stats_url: str = "https://eeshaewrbrqipsvtlyng.supabase.co"
     customer_stats_key: str = ""
     customer_stats_table: str = "statistik"
+    customer_stats_schema: str = "public"
     customer_users_url: str = "https://apltfvenhqwnidmuptdp.supabase.co"
     customer_users_key: str = ""
     customer_users_table: str = "users"
+    # PostgREST picks its first exposed schema when none is given — which may be
+    # a narrow read-only one. Always name the schema the data really lives in.
+    customer_users_schema: str = "public"
     # Disable the legacy upload LaunchAgent once our own upload succeeded once
     auto_disable_legacy_upload: bool = True
 

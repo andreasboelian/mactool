@@ -77,9 +77,11 @@ class ConfigUpdate(BaseModel):
     customer_stats_url: str | None = None
     customer_stats_key: str | None = None
     customer_stats_table: str | None = None
+    customer_stats_schema: str | None = None
     customer_users_url: str | None = None
     customer_users_key: str | None = None
     customer_users_table: str | None = None
+    customer_users_schema: str | None = None
     auto_disable_legacy_upload: bool | None = None
 
 
@@ -302,7 +304,7 @@ async def get_dashboard():
                     <div class="stats-head">
                         <div>
                             <strong>Statistik (Kunde)</strong>
-                            <div class="hint">Ersetzt das alte upload-macXX.py. Ziel A schreibt die Rohdaten (Upsert auf session_id), Ziel B die verschönerten Zahlen inkl. Missing-Session-Einträgen. Leere URL oder leerer Key = Ziel wird übersprungen.</div>
+                            <div class="hint">Ersetzt das alte upload-macXX.py. Ziel A schreibt die Rohdaten (Upsert auf session_id), Ziel B die verschönerten Zahlen inkl. Missing-Session-Einträgen. Leere URL oder leerer Key = Ziel wird übersprungen. Das Schema muss stimmen — ohne Angabe nimmt PostgREST das zuerst freigegebene, was eine schmale Lese-View sein kann.</div>
                         </div>
                         <label class="switch"><input type="checkbox" id="cust-enabled"> aktiv</label>
                     </div>
@@ -321,6 +323,7 @@ async def get_dashboard():
                         <label>Ziel A — Supabase URL<input type="text" id="cust-stats-url" placeholder="https://xxx.supabase.co"></label>
                         <label>Ziel A — Key<input type="text" id="cust-stats-key" placeholder="kein Key gespeichert"></label>
                         <label>Ziel A — Tabelle<input type="text" id="cust-stats-table"></label>
+                        <label>Ziel A — Schema<input type="text" id="cust-stats-schema" placeholder="public"></label>
                     </div>
                     <div class="row-actions">
                         <button class="btn btn-small" onclick="testTarget('customer_stats', 'cust-stats-test')">Ziel A testen</button>
@@ -332,6 +335,7 @@ async def get_dashboard():
                         <label>Ziel B — Supabase URL<input type="text" id="cust-users-url" placeholder="https://xxx.supabase.co"></label>
                         <label>Ziel B — Key<input type="text" id="cust-users-key" placeholder="kein Key gespeichert"></label>
                         <label>Ziel B — Tabelle<input type="text" id="cust-users-table"></label>
+                        <label>Ziel B — Schema<input type="text" id="cust-users-schema" placeholder="public"></label>
                     </div>
                     <div class="row-actions">
                         <button class="btn btn-small" onclick="testTarget('customer_users', 'cust-users-test')">Ziel B testen</button>
@@ -965,9 +969,11 @@ async def get_dashboard():
                     setValue('cust-stats-url', data.customer.stats.url);
                     setKeyField('cust-stats-key', data.customer.stats.key_masked);
                     setValue('cust-stats-table', data.customer.stats.table);
+                    setValue('cust-stats-schema', data.customer.stats.schema);
                     setValue('cust-users-url', data.customer.users.url);
                     setKeyField('cust-users-key', data.customer.users.key_masked);
                     setValue('cust-users-table', data.customer.users.table);
+                    setValue('cust-users-schema', data.customer.users.schema);
                     document.getElementById('cust-auto-disable').checked = !!data.customer.auto_disable_legacy_upload;
 
                     const lastRun = (data.last_runs || {}).customer_stats;
@@ -997,8 +1003,10 @@ async def get_dashboard():
                     customer_stats_session_limit: parseInt(document.getElementById('cust-limit').value, 10) || 90,
                     customer_stats_url: document.getElementById('cust-stats-url').value.trim(),
                     customer_stats_table: document.getElementById('cust-stats-table').value.trim(),
+                    customer_stats_schema: document.getElementById('cust-stats-schema').value.trim(),
                     customer_users_url: document.getElementById('cust-users-url').value.trim(),
                     customer_users_table: document.getElementById('cust-users-table').value.trim(),
+                    customer_users_schema: document.getElementById('cust-users-schema').value.trim(),
                     auto_disable_legacy_upload: document.getElementById('cust-auto-disable').checked
                 };
 
@@ -1055,7 +1063,8 @@ async def get_dashboard():
             }
 
             function renderTargetInfo(info) {
-                const label = info.source_table ? `${info.source_table} → ${info.table}` : info.table;
+                const label = info.source_table ? `${info.source_table} → ${info.table}`
+                    : (info.schema ? `${info.schema}.${info.table}` : info.table);
                 if (info.status === 'not_configured') {
                     return `<div class="status-msg error">${label}: nicht konfiguriert (${info.error || ''})</div>`;
                 }
@@ -1447,6 +1456,8 @@ async def update_config(update: ConfigUpdate):
         )
         if (update.customer_stats_table or "").strip():
             config.customer_stats_table = update.customer_stats_table.strip()
+        if (update.customer_stats_schema or "").strip():
+            config.customer_stats_schema = update.customer_stats_schema.strip()
         if update.customer_users_url is not None:
             config.customer_users_url = update.customer_users_url.strip()
         config.customer_users_key = _apply_key(
@@ -1454,6 +1465,8 @@ async def update_config(update: ConfigUpdate):
         )
         if (update.customer_users_table or "").strip():
             config.customer_users_table = update.customer_users_table.strip()
+        if (update.customer_users_schema or "").strip():
+            config.customer_users_schema = update.customer_users_schema.strip()
         if update.auto_disable_legacy_upload is not None:
             config.auto_disable_legacy_upload = update.auto_disable_legacy_upload
 
@@ -1504,11 +1517,13 @@ async def get_stats_settings():
                     "url": config.customer_stats_url,
                     "key_masked": _mask_key(config.customer_stats_key),
                     "table": config.customer_stats_table,
+                    "schema": config.customer_stats_schema,
                 },
                 "users": {
                     "url": config.customer_users_url,
                     "key_masked": _mask_key(config.customer_users_key),
                     "table": config.customer_users_table,
+                    "schema": config.customer_users_schema,
                 },
                 "unavailable_fields": SUPERDB_UNAVAILABLE_FIELDS,
             },
