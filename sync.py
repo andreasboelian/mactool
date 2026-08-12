@@ -13,6 +13,7 @@ from supabase import create_client, Client
 from config import get_config
 from log_uploader import upload_bot_logs
 from supabase_rest import describe_target
+import db_integrity
 import run_state
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,35 @@ class SyncManager:
         except Exception as e:
             logger.error(f"Failed to initialize Supabase client: {e}")
             raise SyncError(f"Supabase init failed: {e}")
+
+    def _integrity_gate(self, upload_all_logs: bool) -> dict | None:
+        """Run the integrity check. Returns a sync result when the sync must stop."""
+        config = get_config()
+        if not config.db_integrity_check_enabled:
+            return None
+        if not self.db_path.exists():
+            # Kein Defekt, sondern schlicht nichts da — _create_temp_db meldet "no_db"
+            return None
+
+        check = db_integrity.verify_before_upload(self.db_path, self.server_prefix)
+        if check["ok"]:
+            return None
+
+        error = f"Integrity Check der Datenbank fehlgeschlagen: {check['detail']}"
+        logger.error(f"{error} — kein Upload")
+        run_state.record_run(
+            "dashboard_stats",
+            "integrity_failed",
+            error,
+            "manual" if upload_all_logs else "auto",
+            {"integrity": check},
+        )
+        return {
+            "status": "integrity_failed",
+            "tables": {},
+            "integrity": check,
+            "error": error,
+        }
 
     def _create_temp_db(self) -> Path:
         """Create temporary copy of SQLite database."""
@@ -535,6 +565,14 @@ class SyncManager:
         logger.info(
             f"Starting SQLite → Supabase sync... (upload_all_logs={upload_all_logs})"
         )
+
+        # Eine beschädigte super.db wird nicht hochgeladen. Die Prüfung läuft auf
+        # dem Original, bevor die Arbeitskopie gezogen wird — eine kaputte Datei
+        # zu kopieren hilft niemandem. Eine fehlende DB ist kein Defekt und wird
+        # weiter unten als "no_db" behandelt, ohne jemanden per Mail zu wecken.
+        integrity_abort = self._integrity_gate(upload_all_logs)
+        if integrity_abort:
+            return integrity_abort
 
         # Reset per-sync caches
         self._supabase_columns = {}

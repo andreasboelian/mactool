@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.0.114 — 2026-08-12
+- **Vor dem Supabase-Sync wird die super.db geprüft.** `PRAGMA integrity_check` läuft auf dem
+  Original, *bevor* die Arbeitskopie gezogen wird. Ist die Datei beschädigt, findet **kein**
+  Upload statt — bisher wären beschädigte oder unvollständige Daten nach Supabase gewandert
+- **E-Mail-Alarm bei beschädigter Datenbank** an `development@ebm-group.de` (einstellbar):
+  „Auf macXX war der Integrity Check der Datenbank fehlerhaft", dazu Pfad, Zeitpunkt und die
+  Meldung von SQLite. Versand per SMTP direkt vom Mac, Zugangsdaten im Dashboard
+- Keine Mailflut: eine Mail je Störung, danach frühestens nach der eingestellten Wiederholsperre
+  (Default 6 h); eine erfolgreiche Prüfung setzt den Zähler zurück. Konnte die Mail nicht
+  zugestellt werden, wird es beim nächsten Lauf erneut versucht
+- Eine **fehlende** Datenbank ist kein Defekt und löst keine Mail aus — das bleibt `no_db`
+- Dashboard: neuer Block „Datenbank-Prüfung + E-Mail-Alarm" mit „Testmail senden" und
+  „Jetzt prüfen"; das SMTP-Passwort wird wie die Supabase-Keys nur maskiert ausgeliefert
+- **Fehlende Xcode Command Line Tools werden im Klartext gemeldet.** Ohne sie ist `git` auf
+  macOS nur eine Attrappe: das Dashboard zeigte „Version: unknown" und das Update brach mit
+  „git reset failed: xcrun: error…" ab. Jetzt steht da, was zu tun ist (`xcode-select --install`)
+
 ## v1.0.113 — 2026-08-10
 - **Fix: der Kunden-Upload schrieb ins falsche Schema.** PostgREST löst eine Anfrage ohne
   Schema-Angabe gegen das *zuerst freigegebene* Schema auf. In der Kunden-Supabase ist das

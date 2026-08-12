@@ -201,3 +201,59 @@ Behoben: beide Profile-Header werden gesendet, Schema je Ziel konfigurierbar (De
 ### Offen (nur auf Wunsch)
 - Commit + Tag v1.0.109 + Push
 - Pro Mac: Keys eintragen, Toggle „Statistik (Kunde)" einschalten
+
+---
+
+# Integritaetspruefung der super.db vor dem Supabase-Sync (Plan)
+
+Ziel: Eine beschaedigte super.db darf nicht hochgeladen werden. Vor dem Kopieren der DB
+laeuft `PRAGMA integrity_check`. Ist alles ok, laeuft der Upload wie bisher. Ist er es
+nicht, findet **kein** Upload statt und development@ebm-group.de bekommt eine Mail:
+"Auf macXX war der Integrity Check der Datenbank fehlerhaft."
+
+## Entscheidungen (mit Andreas abgestimmt)
+- **Mailversand**: SMTP direkt vom Mac (keine n8n-Abhaengigkeit). Zugangsdaten pro Mac
+  in der config.json bzw. ueber das Dashboard.
+- **Umfang**: nur der Supabase-Sync (`sync.py`). Die Kunden-Statistik bleibt unberuehrt.
+
+## Umsetzung
+- [x] `config.py` + `config.json.example`: `db_integrity_check_enabled`, `alert_smtp_*`,
+      `alert_mail_from/to` (Default development@ebm-group.de), `alert_mail_cooldown_hours`
+- [x] `mailer.py` (neu): `send_alert()` per smtplib, STARTTLS/SSL/none, wirft nie
+- [x] `db_integrity.py` (neu): `check_database()` (read-only, WAL-Fallback) und
+      `verify_before_upload()` inkl. Mail + Wiederholsperre
+- [x] `sync.py`: Gate vor `_create_temp_db()`, neuer Status `integrity_failed`, kein Upload
+- [x] `api.py`: SMTP-Block in den Einstellungen, Passwort maskiert wie die Keys,
+      Buttons "Testmail senden" und "Jetzt pruefen"
+- [x] `tests/test_integrity.py`: echte kaputte SQLite-Datei, Mailtext, Sperre, Sync-Abbruch
+
+## Regeln, die dabei gelten
+- Fehlende DB ist **kein** Integritaetsfehler → bleibt beim bisherigen `no_db`, keine Mail
+- Pruefung laeuft auf dem Original *vor* der Kopie (so wollte es Andreas), read-only
+- Keine 12 Mails am Tag: eine Mail je Stoerung, danach fruehestens nach `cooldown_hours`,
+  Zaehler wird bei einer erfolgreichen Pruefung zurueckgesetzt
+
+## Review (12.08.2026)
+Gebaut wie geplant, 9 von 9 Testsuiten gruen (`./tests/run_all.sh`).
+
+**Was der Test gefunden hat:** die erste Fassung legte bei fehlender Datenbank eine neue,
+leere an — `sqlite3.connect(pfad)` tut das stillschweigend, und eine leere Datenbank besteht
+jede Pruefung. Der Fallback fuer WAL-Datenbanken oeffnet jetzt ueber `file:...?mode=rw`,
+das legt nichts an. Zusaetzlich prueft `check_database()` vorher auf Existenz.
+
+**Zweiter Fund:** SQLite meldet bis zu 100 Defekte in *einer* Zeile mit Zeilenumbruechen.
+Ungekuerzt haette ein mehrere KB langer Block in Mail, Dashboard und run_state.json
+gestanden — jetzt aufgeteilt, 8 Meldungen plus Zaehler.
+
+**Verifiziert:**
+- echte, gezielt zerstoerte SQLite-Datei wird erkannt (nicht simuliert)
+- kein Upload, kein Tabellenzugriff nach fehlgeschlagener Pruefung
+- Mailtext, Betreff, Empfaenger und der SMTP-Ablauf (STARTTLS vor Login, SSL ohne STARTTLS,
+  ohne Benutzer kein Login, toter Server wirft nicht)
+- Sperre gegen Mailflut inkl. Ruecksetzen nach erfolgreicher Pruefung
+- Dashboard-Seite laedt, alle JS-IDs existieren, JS syntaktisch geprueft (`node --check`)
+- SMTP-Passwort verlaesst den Server nur maskiert
+
+**Offen:** Commit + Tag v1.0.114 + Push, danach pro Mac SMTP-Zugangsdaten eintragen und
+einmal "Testmail senden" druecken. Ohne SMTP-Daten unterbleibt der Upload bei einer
+kaputten DB trotzdem — die Meldung steht dann nur im Log.

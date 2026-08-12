@@ -1,6 +1,9 @@
 """FastAPI web interface for mactool."""
 
 import logging
+from datetime import datetime
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +16,9 @@ from customer_stats import (
     check_customer_target,
     SUPERDB_UNAVAILABLE_FIELDS,
 )
+import db_integrity
 import legacy_upload
+import mailer
 import run_state
 from device_monitor import (
     get_adb_devices,
@@ -83,6 +88,17 @@ class ConfigUpdate(BaseModel):
     customer_users_table: str | None = None
     customer_users_schema: str | None = None
     auto_disable_legacy_upload: bool | None = None
+
+    # DB-Integritätsprüfung + E-Mail-Alarm
+    db_integrity_check_enabled: bool | None = None
+    alert_mail_to: str | None = None
+    alert_mail_from: str | None = None
+    alert_smtp_host: str | None = None
+    alert_smtp_port: int | None = None
+    alert_smtp_user: str | None = None
+    alert_smtp_password: str | None = None  # wie die Keys: maskiert rein, leer = unverändert
+    alert_smtp_security: str | None = None
+    alert_mail_cooldown_hours: int | None = None
 
 
 class DeviceAction(BaseModel):
@@ -349,6 +365,38 @@ async def get_dashboard():
                         <span class="last-run" id="cust-last-run"></span>
                     </div>
                     <div id="cust-preview"></div>
+                </div>
+
+                <div class="stats-block">
+                    <div class="stats-head">
+                        <div>
+                            <strong>Datenbank-Prüfung + E-Mail-Alarm</strong>
+                            <div class="hint">Vor jedem Supabase-Sync läuft <code>PRAGMA integrity_check</code> auf der super.db — geprüft wird das Original, bevor die Arbeitskopie gezogen wird. Ist die Datei beschädigt, findet <strong>kein</strong> Upload statt und es geht eine Mail raus. Eine fehlende Datenbank ist kein Defekt und löst keine Mail aus.</div>
+                        </div>
+                        <label class="switch"><input type="checkbox" id="alert-integrity"> Prüfung aktiv</label>
+                    </div>
+                    <div class="fields">
+                        <label>Empfänger<input type="text" id="alert-to" placeholder="development@ebm-group.de"></label>
+                        <label>Absender (leer = SMTP-Benutzer)<input type="text" id="alert-from" placeholder="mactool@ebm-group.de"></label>
+                        <label>SMTP-Server<input type="text" id="alert-host" placeholder="smtp.example.de"></label>
+                        <label>Port<input type="number" id="alert-port" min="1" max="65535"></label>
+                        <label>Verschlüsselung
+                            <select id="alert-security">
+                                <option value="starttls">STARTTLS (Port 587)</option>
+                                <option value="ssl">SSL/TLS (Port 465)</option>
+                                <option value="none">keine</option>
+                            </select>
+                        </label>
+                        <label>Benutzer<input type="text" id="alert-user" placeholder="leer = ohne Anmeldung"></label>
+                        <label>Passwort<input type="password" id="alert-password" placeholder="kein Passwort gespeichert"></label>
+                        <label>Wiederholsperre (Stunden)<input type="number" id="alert-cooldown" min="0"></label>
+                    </div>
+                    <div class="row-actions">
+                        <button class="btn btn-small" onclick="sendTestMail()">Testmail senden</button>
+                        <button class="btn btn-small" style="background:#666;" onclick="runIntegrityCheck()">Jetzt prüfen</button>
+                        <span class="last-run" id="alert-last-check"></span>
+                    </div>
+                    <div id="alert-test"></div>
                 </div>
 
                 <div class="stats-block">
@@ -976,6 +1024,20 @@ async def get_dashboard():
                     setValue('cust-users-schema', data.customer.users.schema);
                     document.getElementById('cust-auto-disable').checked = !!data.customer.auto_disable_legacy_upload;
 
+                    const alerts = data.alerts || {};
+                    document.getElementById('alert-integrity').checked = !!alerts.integrity_check_enabled;
+                    setValue('alert-to', alerts.mail_to);
+                    setValue('alert-from', alerts.mail_from);
+                    setValue('alert-host', alerts.smtp_host);
+                    setValue('alert-port', alerts.smtp_port);
+                    setValue('alert-security', alerts.smtp_security || 'starttls');
+                    setValue('alert-user', alerts.smtp_user);
+                    setKeyField('alert-password', alerts.password_masked);
+                    document.getElementById('alert-password').placeholder =
+                        alerts.password_masked || 'kein Passwort gespeichert';
+                    setValue('alert-cooldown', alerts.cooldown_hours);
+                    renderIntegrityRun((data.last_runs || {}).db_integrity, alerts.db_path);
+
                     const lastRun = (data.last_runs || {}).customer_stats;
                     renderTargetState('cust-stats-state', 'Ziel A', data.customer.stats,
                                       (lastRun && lastRun.detail || {}).statistik, lastRun);
@@ -1007,14 +1069,23 @@ async def get_dashboard():
                     customer_users_url: document.getElementById('cust-users-url').value.trim(),
                     customer_users_table: document.getElementById('cust-users-table').value.trim(),
                     customer_users_schema: document.getElementById('cust-users-schema').value.trim(),
-                    auto_disable_legacy_upload: document.getElementById('cust-auto-disable').checked
+                    auto_disable_legacy_upload: document.getElementById('cust-auto-disable').checked,
+                    db_integrity_check_enabled: document.getElementById('alert-integrity').checked,
+                    alert_mail_to: document.getElementById('alert-to').value.trim(),
+                    alert_mail_from: document.getElementById('alert-from').value.trim(),
+                    alert_smtp_host: document.getElementById('alert-host').value.trim(),
+                    alert_smtp_port: parseInt(document.getElementById('alert-port').value, 10) || 587,
+                    alert_smtp_user: document.getElementById('alert-user').value.trim(),
+                    alert_smtp_security: document.getElementById('alert-security').value,
+                    alert_mail_cooldown_hours: parseInt(document.getElementById('alert-cooldown').value, 10) || 0
                 };
 
                 // Keys only travel when something was actually typed
                 const keyFields = {
                     supabase_key: 'dash-key',
                     customer_stats_key: 'cust-stats-key',
-                    customer_users_key: 'cust-users-key'
+                    customer_users_key: 'cust-users-key',
+                    alert_smtp_password: 'alert-password'
                 };
                 for (const [field, id] of Object.entries(keyFields)) {
                     const value = document.getElementById(id).value.trim();
@@ -1040,6 +1111,53 @@ async def get_dashboard():
                     msgDiv.innerHTML = `<div class="status-msg error">✗ Fehler: ${e.message}</div>`;
                 }
                 setTimeout(() => { msgDiv.innerHTML = ''; }, 10000);
+            }
+
+            function renderIntegrityRun(run, dbPath) {
+                const el = document.getElementById('alert-last-check');
+                if (!el) return;
+                if (!run) {
+                    el.textContent = dbPath ? `noch nicht geprüft — ${dbPath}` : 'noch nicht geprüft';
+                    el.style.color = '';
+                    return;
+                }
+                const when = run.at ? run.at.replace('T', ' ') : '?';
+                el.textContent = `zuletzt ${when} — ${run.summary || run.status}`;
+                el.style.color = run.status === 'success' ? '' : '#f44336';
+            }
+
+            async function sendTestMail() {
+                const out = document.getElementById('alert-test');
+                out.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Sende Testmail...</div>';
+                try {
+                    const resp = await fetch('/api/alert/test', { method: 'POST' });
+                    const data = await resp.json();
+                    out.innerHTML = resp.ok
+                        ? `<div class="status-msg success">✓ Testmail an ${data.to} verschickt</div>`
+                        : `<div class="status-msg error">✗ ${data.detail || 'Versand fehlgeschlagen'}</div>`;
+                } catch (e) {
+                    out.innerHTML = `<div class="status-msg error">✗ Fehler: ${e.message}</div>`;
+                }
+            }
+
+            async function runIntegrityCheck() {
+                const out = document.getElementById('alert-test');
+                out.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Prüfe Datenbank...</div>';
+                try {
+                    const resp = await fetch('/api/db/integrity-check', { method: 'POST' });
+                    const data = await resp.json();
+                    if (!resp.ok) {
+                        out.innerHTML = `<div class="status-msg error">✗ ${data.detail || 'Prüfung fehlgeschlagen'}</div>`;
+                        return;
+                    }
+                    // Bewusst kein loadStatsSettings(): die Handprüfung schreibt keinen
+                    // Zustand und würde nur ungespeicherte Eingaben im Formular verwerfen.
+                    out.innerHTML = data.ok
+                        ? `<div class="status-msg success">✓ Datenbank in Ordnung (${data.seconds}s)</div>`
+                        : `<div class="status-msg error">✗ Datenbank beschädigt: ${data.detail}</div>`;
+                } catch (e) {
+                    out.innerHTML = `<div class="status-msg error">✗ Fehler: ${e.message}</div>`;
+                }
             }
 
             async function testTarget(target, outputId) {
@@ -1470,6 +1588,36 @@ async def update_config(update: ConfigUpdate):
         if update.auto_disable_legacy_upload is not None:
             config.auto_disable_legacy_upload = update.auto_disable_legacy_upload
 
+        # ── DB-Integritätsprüfung + E-Mail-Alarm ──
+        if update.db_integrity_check_enabled is not None:
+            config.db_integrity_check_enabled = update.db_integrity_check_enabled
+        if update.alert_mail_to is not None:
+            config.alert_mail_to = update.alert_mail_to.strip()
+        if update.alert_mail_from is not None:
+            config.alert_mail_from = update.alert_mail_from.strip()
+        if update.alert_smtp_host is not None:
+            config.alert_smtp_host = update.alert_smtp_host.strip()
+        if update.alert_smtp_port is not None:
+            port = int(update.alert_smtp_port)
+            if not 1 <= port <= 65535:
+                raise HTTPException(status_code=400, detail="alert_smtp_port muss 1-65535 sein")
+            config.alert_smtp_port = port
+        if update.alert_smtp_user is not None:
+            config.alert_smtp_user = update.alert_smtp_user.strip()
+        config.alert_smtp_password = _apply_key(
+            config.alert_smtp_password, update.alert_smtp_password
+        )
+        if update.alert_smtp_security is not None:
+            security = update.alert_smtp_security.strip().lower()
+            if security not in ("starttls", "ssl", "none"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="alert_smtp_security muss 'starttls', 'ssl' oder 'none' sein",
+                )
+            config.alert_smtp_security = security
+        if update.alert_mail_cooldown_hours is not None:
+            config.alert_mail_cooldown_hours = max(0, int(update.alert_mail_cooldown_hours))
+
         config.save()
         logger.info("Configuration updated")
 
@@ -1527,12 +1675,55 @@ async def get_stats_settings():
                 },
                 "unavailable_fields": SUPERDB_UNAVAILABLE_FIELDS,
             },
+            "alerts": {
+                "integrity_check_enabled": config.db_integrity_check_enabled,
+                "mail_to": config.alert_mail_to,
+                "mail_from": config.alert_mail_from,
+                "smtp_host": config.alert_smtp_host,
+                "smtp_port": config.alert_smtp_port,
+                "smtp_user": config.alert_smtp_user,
+                "password_masked": _mask_key(config.alert_smtp_password),
+                "smtp_security": config.alert_smtp_security,
+                "cooldown_hours": config.alert_mail_cooldown_hours,
+                "db_path": str(Path(config.sqlite_db_path).expanduser()),
+            },
             "legacy_upload": legacy_upload.get_status(),
             "last_runs": run_state.get_runs(),
         }
     except Exception as e:
         logger.error(f"Failed to get stats settings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/alert/test")
+async def send_test_alert():
+    """Send a test mail so the SMTP settings can be verified without a defect."""
+    import asyncio
+
+    config = get_config()
+    result = await asyncio.to_thread(
+        mailer.send_alert,
+        f"[mactool] {config.server_name}: Testmail",
+        f"Testmail vom Mactool auf {config.server_name}.\n\n"
+        f"Wenn diese Mail ankommt, erreicht auch die Warnung bei einer beschädigten "
+        f"Datenbank ihr Ziel.\n"
+        f"Zeitpunkt: {datetime.now():%Y-%m-%d %H:%M:%S}\n",
+    )
+    if result.get("status") != "sent":
+        raise HTTPException(status_code=400, detail=result.get("error", "Versand fehlgeschlagen"))
+    return result
+
+
+@app.post("/api/db/integrity-check")
+async def run_integrity_check():
+    """Run the integrity check on demand — checks only, never mails, never uploads."""
+    import asyncio
+
+    config = get_config()
+    db_path = Path(config.sqlite_db_path).expanduser()
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail=f"Datenbank nicht gefunden: {db_path}")
+    return await asyncio.to_thread(db_integrity.check_database, db_path)
 
 
 @app.post("/api/stats/dashboard/run")

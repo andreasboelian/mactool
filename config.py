@@ -61,6 +61,21 @@ class AppConfig:
     # Disable the legacy upload LaunchAgent once our own upload succeeded once
     auto_disable_legacy_upload: bool = True
 
+    # ── DB-Integritätsprüfung + E-Mail-Alarm ─────────────────────────
+    # Vor dem Supabase-Sync läuft `PRAGMA integrity_check` auf der super.db.
+    # Ist sie beschädigt, wird nichts hochgeladen und eine Mail verschickt —
+    # sonst merkt es niemand, die Macs laufen unbeaufsichtigt.
+    db_integrity_check_enabled: bool = True
+    alert_mail_to: str = "development@ebm-group.de"
+    alert_mail_from: str = ""  # leer = alert_smtp_user
+    alert_smtp_host: str = ""
+    alert_smtp_port: int = 587
+    alert_smtp_user: str = ""
+    alert_smtp_password: str = ""
+    alert_smtp_security: str = "starttls"  # "starttls" | "ssl" | "none"
+    # Bleibt die DB kaputt, nicht bei jedem Sync erneut mailen
+    alert_mail_cooldown_hours: int = 6
+
     def save(self):
         """Save configuration to config.json."""
         try:

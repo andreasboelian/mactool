@@ -32,5 +32,15 @@
   "customer_users_key": "",
   "customer_users_table": "users",
   "customer_users_schema": "public",
-  "auto_disable_legacy_upload": true
+  "auto_disable_legacy_upload": true,
+
+  "db_integrity_check_enabled": true,
+  "alert_mail_to": "development@ebm-group.de",
+  "alert_mail_from": "",
+  "alert_smtp_host": "",
+  "alert_smtp_port": 587,
+  "alert_smtp_user": "",
+  "alert_smtp_password": "",
+  "alert_smtp_security": "starttls",
+  "alert_mail_cooldown_hours": 6
 }

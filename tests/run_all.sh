@@ -23,6 +23,7 @@ TESTS=(
   test_incomplete.py   # a target without a key is not "success"
   test_permission.py   # missing write rights abort at once
   test_schema.py       # Accept-Profile / Content-Profile must be sent
+  test_integrity.py    # kaputte super.db: kein Upload, dafuer eine Mail
 )
 
 mkdir -p "$WORKDIR"

@@ -13,6 +13,13 @@ logger = logging.getLogger(__name__)
 APP_DIR = Path(__file__).parent
 
 
+GIT_MISSING_HINT = (
+    "Xcode Command Line Tools are missing — git cannot run on this Mac. "
+    "Fix: run 'xcode-select --install' in Terminal "
+    "(or 'sudo xcode-select --reset' if only the path is broken), then retry."
+)
+
+
 def _git(args: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
     """Run a git command in APP_DIR."""
     return subprocess.run(
@@ -22,6 +29,34 @@ def _git(args: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
         text=True,
         timeout=timeout,
     )
+
+
+def _clt_broken(text: str | None) -> bool:
+    """True if git failed because the Command Line Tools are missing or broken."""
+    lowered = (text or "").lower()
+    return "xcode-select" in lowered or "xcrun" in lowered
+
+
+def _git_health() -> str | None:
+    """Return an error message if git itself cannot run at all, else None.
+
+    On macOS /usr/bin/git is only a stub: without the Command Line Tools every
+    git call fails, which otherwise surfaces as a cryptic 'git reset failed'.
+    """
+    try:
+        result = _git(["--version"], timeout=10)
+    except FileNotFoundError:
+        return f"git not installed. {GIT_MISSING_HINT}"
+    except Exception as e:
+        return f"git not usable: {e}"
+
+    if result.returncode == 0:
+        return None
+
+    detail = (result.stderr or result.stdout).strip()
+    if _clt_broken(detail):
+        return f"{GIT_MISSING_HINT} (git said: {detail})"
+    return f"git not usable: {detail}"
 
 
 def get_current_version() -> str:
@@ -42,7 +77,15 @@ def get_current_version() -> str:
 
         # Fallback: short SHA
         result = _git(["rev-parse", "--short", "HEAD"])
-        return result.stdout.strip() if result.returncode == 0 else "unknown"
+        if result.returncode == 0:
+            return result.stdout.strip()
+
+        # Nothing worked — say why, so the dashboard is actionable
+        if _clt_broken(result.stderr):
+            return "unknown (Xcode Command Line Tools missing)"
+        return "unknown"
+    except FileNotFoundError:
+        return "unknown (git not installed)"
     except Exception:
         return "unknown"
 
@@ -67,6 +110,10 @@ def check_for_updates() -> dict:
         return {"status": "error", "error": "github_repo not configured"}
 
     try:
+        git_error = _git_health()
+        if git_error:
+            return {"status": "error", "error": git_error}
+
         git_dir = APP_DIR / ".git"
         if not git_dir.exists():
             return {"status": "not_initialized", "message": "Git not initialized"}
@@ -110,6 +157,10 @@ def perform_update(version: str | None = None) -> dict:
     config = get_config()
     if not config.github_repo:
         return {"status": "error", "error": "github_repo not configured"}
+
+    git_error = _git_health()
+    if git_error:
+        return {"status": "error", "error": git_error}
 
     git_dir = APP_DIR / ".git"
 
