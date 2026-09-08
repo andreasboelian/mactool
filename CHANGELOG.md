@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.0.120 — 2026-09-08
+- **Fix: hochgeladene Logs bekamen Daten in der Zukunft.** In der Logzeile steht nur
+  `[MM/TT HH:MM:SS]`, das Jahr fehlt. Bisher wurde immer das laufende Jahr angenommen und
+  nur der Fall Dezember/Januar korrigiert. In den Logverzeichnissen liegen aber Dateien von
+  2022 bis heute — auf mac04 sind es 3826. Aus einem Log vom **Dezember 2024** wurde damit
+  `2026-12-27`
+- Solche Dateien blieben für immer im Bucket liegen: auf ein Datum in der Zukunft greift
+  die 3-Tage-Frist nie. Daher 400 bis 800 Objekte je Mac statt der erwarteten paar Dutzend
+- Das Jahr wird jetzt so gewählt, dass Tag und Monat am dichtesten am **Änderungsdatum der
+  Datei** liegen. Das ist der bessere Anker als „jetzt": Dateidatum und Loginhalt stammen
+  von derselben Maschine und sind auch dann zueinander stimmig, wenn deren Systemuhr
+  verstellt ist. Der Jahreswechsel ist damit in beide Richtungen abgedeckt, der 29.02. in
+  einem Nicht-Schaltjahr wirft nicht mehr
+- Die Bereinigung räumt die bereits entstandenen Zukunftsdateien mit weg: ein Datum mehr
+  als zwei Tage voraus kann kein gültiger Log sein. Zwei Tage Spielraum, weil die Systemuhr
+  der Macs verstellt sein darf
+
 ## v1.0.119 — 2026-09-08
 - **Der Fernzugriff rechnet jetzt mit der Uhr der Datenbank, nicht mit der des Macs.**
   Auf den Macs darf die Systemuhr bewusst verstellt sein. Bisher wurde das Verfallsdatum

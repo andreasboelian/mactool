@@ -354,6 +354,37 @@ check("Fenstergrenze ist inklusiv: 09:59-10:30 gehoert zu 08:00",
       _slot_covers_window("09:59-10:30", 8) is True)
 
 
+# ── 10bb. Jahr aus dem Dateidatum (Regression zu v1.0.120) ────────────
+print("\n[10bb] Jahreszuordnung der Logdateien")
+from datetime import datetime as _DT
+from log_uploader import _infer_year, _parse_log_timestamp
+
+# In der Logzeile steht nur [MM/TT]. Die alte Regel nahm immer das laufende
+# Jahr — aus einem Log vom Dezember 2024 wurde damit 2026-12-27, ein Datum in
+# der Zukunft, das die 3-Tage-Frist nie erreicht.
+check("Dezember-Log neben Dezember-Datei bleibt im selben Jahr",
+      _infer_year(12, 27, _DT(2024, 12, 27, 6, 8)) == 2024)
+check("jahrealte Datei bekommt NICHT das laufende Jahr",
+      _infer_year(12, 27, _DT(2024, 12, 27, 6, 8)) != _DT.now().year)
+check("Jahreswechsel rueckwaerts: Dez-Log, Januar-Datei",
+      _infer_year(12, 31, _DT(2025, 1, 1, 0, 30)) == 2024)
+check("Jahreswechsel vorwaerts: Jan-Log, Dezember-Datei",
+      _infer_year(1, 1, _DT(2024, 12, 31, 23, 30)) == 2025)
+check("29.02. im Nicht-Schaltjahr wirft nicht",
+      _infer_year(2, 29, _DT(2025, 3, 1, 12, 0)) in (2024, 2025, 2026))
+
+# Echte Datei mit gesetztem Aenderungsdatum
+import os
+old_log = logs_dir / "creatif_dr.log"
+old_log.write_text("[12/27 06:08:44] alte Sitzung\n")
+stamp = _DT(2024, 12, 27, 6, 9).timestamp()
+os.utime(old_log, (stamp, stamp))
+check("Datei von 2024 wird als 2024 hochgeladen",
+      _parse_log_timestamp(old_log) == ("2024-12-27", "0608"),
+      _parse_log_timestamp(old_log))
+old_log.write_text("[09/08 04:12:33] start\n")  # Fixture wiederherstellen
+
+
 # ── 10c. Verstellte Systemuhr (Regression zu v1.0.119) ────────────────
 print("\n[10c] Verstellte Systemuhr")
 # Auf den Macs darf die Uhr bewusst falsch stehen. Verfall und Zeitstempel

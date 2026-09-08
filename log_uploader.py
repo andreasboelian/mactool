@@ -73,6 +73,42 @@ def _ensure_bucket(client: Client) -> bool:
         return False
 
 
+def _reference_time(file_path: Path) -> datetime:
+    """Wann wurde diese Logdatei zuletzt beschrieben?
+
+    Der bessere Anker als „jetzt": beide Zeitangaben — Dateidatum und Inhalt —
+    stammen von derselben Maschine, sind also auch dann zueinander stimmig, wenn
+    deren Systemuhr verstellt ist.
+    """
+    try:
+        return datetime.fromtimestamp(file_path.stat().st_mtime)
+    except Exception as e:
+        logger.debug(f"Kein Änderungsdatum für {file_path.name}: {e}")
+        return datetime.now()
+
+
+def _infer_year(month: int, day: int, reference: datetime) -> int:
+    """Das Jahr wählen, das Tag/Monat am dichtesten an `reference` legt.
+
+    In der Logzeile steht nur `[MM/TT HH:MM:SS]` — das Jahr fehlt. Die alte Regel
+    nahm immer das laufende Jahr und korrigierte nur den Fall Dezember/Januar.
+    In den Logverzeichnissen liegen aber Dateien von 2022 bis heute (auf mac04
+    sind es 3826). Aus einem Log vom Dezember 2024 wurde damit `2026-12-27` —
+    ein Datum in der Zukunft. Solche Dateien blieben für immer im Bucket liegen,
+    weil die 3-Tage-Frist auf ein Zukunftsdatum nie greift.
+    """
+    best: tuple[float, int] | None = None
+    for year in (reference.year - 1, reference.year, reference.year + 1):
+        try:
+            candidate = datetime(year, month, day)
+        except ValueError:
+            continue  # 29.02. in einem Nicht-Schaltjahr
+        distance = abs((candidate - reference).total_seconds())
+        if best is None or distance < best[0]:
+            best = (distance, year)
+    return best[1] if best else reference.year
+
+
 def _parse_log_timestamp(file_path: Path) -> tuple[str, str] | None:
     """Extract date and time from the first line of a log file.
 
@@ -93,11 +129,7 @@ def _parse_log_timestamp(file_path: Path) -> tuple[str, str] | None:
         hour = int(match.group(3))
         minute = int(match.group(4))
 
-        # Infer year: if log month is Dec and current month is Jan, use last year
-        now = datetime.now()
-        year = now.year
-        if month == 12 and now.month == 1:
-            year -= 1
+        year = _infer_year(month, day, _reference_time(file_path))
 
         date_str = f"{year}-{month:02d}-{day:02d}"
         time_str = f"{hour:02d}{minute:02d}"
@@ -312,7 +344,14 @@ def _cleanup_old_logs(client: Client, server_name: str, retention_days: int = RE
             _mark_cleanup_done()
             return 0
 
-        cutoff = datetime.now() - timedelta(days=retention_days)
+        now = datetime.now()
+        cutoff = now - timedelta(days=retention_days)
+        # Ein Datum in der Zukunft kann kein gültiger Log sein. Solche Namen sind
+        # vor dem Jahres-Fix massenhaft entstanden (ein Log vom Dezember 2024 wurde
+        # als 2026-12-27 abgelegt) und wären sonst nie wieder weggekommen: die
+        # Aufbewahrungsfrist greift auf einem Zukunftsdatum nie.
+        # Zwei Tage Spielraum, weil die Systemuhr der Macs verstellt sein darf.
+        future_cutoff = now + timedelta(days=2)
         to_delete = []
 
         for f in files:
@@ -322,7 +361,7 @@ def _cleanup_old_logs(client: Client, server_name: str, retention_days: int = RE
                 continue
             try:
                 file_date = datetime.strptime(name[:10], "%Y-%m-%d")
-                if file_date < cutoff:
+                if file_date < cutoff or file_date > future_cutoff:
                     to_delete.append(f"{server_name}/{name}")
             except ValueError:
                 continue
