@@ -45,7 +45,20 @@ def _client() -> SupabaseRest | None:
     return SupabaseRest(config.supabase_url, config.supabase_key)
 
 
-def _now() -> datetime:
+def _now(client: SupabaseRest | None = None) -> datetime:
+    """Die maßgebliche Zeit — die der Datenbank, nicht die des Macs.
+
+    Auf den Macs darf die Systemuhr bewusst verstellt sein. Verglichen wir das
+    Verfallsdatum eines Auftrags gegen die lokale Uhr, würde ein Mac, der eine
+    halbe Stunde vorgeht, jeden Auftrag verwerfen, bevor er ihn ausführt — und
+    zwar lautlos, mit der Begründung „abgelaufen".
+
+    Vor der ersten Antwort des Servers bleibt nur die lokale Uhr.
+    """
+    if client is not None:
+        server_time = client.server_now()
+        if server_time is not None:
+            return server_time
     return datetime.now(timezone.utc)
 
 
@@ -84,7 +97,7 @@ def _finish(client: SupabaseRest, table: str, command_id, values: dict) -> None:
         client.update(
             table,
             {"id": f"eq.{command_id}"},
-            {**values, "finished_at": _now().isoformat()},
+            {**values, "finished_at": _now(client).isoformat()},
         )
     except Exception as e:
         logger.error(f"Ergebnis für Befehl {command_id} nicht zurückgeschrieben: {e}")
@@ -171,7 +184,7 @@ def _claim(client: SupabaseRest, table: str, row: dict) -> bool:
         changed = client.update(
             table,
             {"id": f"eq.{row['id']}", "status": "eq.queued"},
-            {"status": "running", "claimed_at": _now().isoformat()},
+            {"status": "running", "claimed_at": _now(client).isoformat()},
             retries=1,
         )
         return bool(changed)
@@ -208,8 +221,10 @@ def _heartbeat(client: SupabaseRest, config) -> None:
                     # weil das SQL noch nicht eingespielt ist, bleibt wenigstens die
                     # Mac-Zeit stehen. Schickten wir last_seen gar nicht, behielte
                     # der Upsert beim Aktualisieren den alten Wert für immer bei.
-                    "last_seen": _now().isoformat(),
-                    "agent_clock": _now().isoformat(),
+                    "last_seen": _now(client).isoformat(),
+                    # Absichtlich die *lokale* Uhr: genau ihre Abweichung
+                    # soll diese Spalte sichtbar machen.
+                    "agent_clock": datetime.now(timezone.utc).isoformat(),
                     "version": get_current_version(),
                     "hostname": socket.gethostname(),
                     "platform": platform.platform(),
@@ -269,7 +284,7 @@ def poll_once() -> dict:
         # Tage aus war, beim Hochfahren einen längst überholten Befehl abarbeiten
         # — im schlimmsten Fall ein 'update' auf eine Version von vorgestern.
         expires_at = _parse_timestamp(row.get("expires_at"))
-        if expires_at and expires_at < _now():
+        if expires_at and expires_at < _now(client):
             if _claim(client, table, row):
                 _finish(
                     client,

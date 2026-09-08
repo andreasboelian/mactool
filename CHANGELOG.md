@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.0.119 — 2026-09-08
+- **Der Fernzugriff rechnet jetzt mit der Uhr der Datenbank, nicht mit der des Macs.**
+  Auf den Macs darf die Systemuhr bewusst verstellt sein. Bisher wurde das Verfallsdatum
+  eines Auftrags gegen die lokale Uhr geprüft — ein Mac, der eine halbe Stunde vorgeht,
+  hätte jeden Auftrag mit der 15-Minuten-Frist sofort als „abgelaufen" verworfen und den
+  Fernzugriff damit lautlos stillgelegt
+- Als gemeinsame Referenz dient der `Date`-Header, den jede Antwort der Datenbank ohnehin
+  mitbringt. Fortgeschrieben wird er mit `time.monotonic()` — das läuft weiter, auch wenn
+  jemand die Systemuhr mitten im Betrieb verstellt. Betrifft `expires_at`, `claimed_at`
+  und `finished_at`
+- `agent_clock` bleibt bewusst die **lokale** Uhr des Macs: genau ihre Abweichung soll die
+  Spalte sichtbar machen. `macctl.py list` zeigt sie als eigene Spalte an, ohne den Status
+  zu verfälschen
+- Auf mac07 gemessen: die Uhr geht 7 Minuten nach. Vorher stand der Mac deshalb dauerhaft
+  auf „ABGEMELDET", obwohl er sekündlich antwortete
+
 ## v1.0.118 — 2026-09-08
 - **Fix zu v1.0.117: der Heartbeat braucht das neue SQL nicht mehr zwingend.** v1.0.117
   schickte nur noch `agent_clock` und überließ `last_seen` dem Trigger. War das SQL noch

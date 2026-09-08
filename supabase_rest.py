@@ -14,6 +14,8 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 import requests
 
@@ -92,6 +94,8 @@ class SupabaseRest:
         self.key = (key or "").strip()
         self.timeout = timeout
         self.schema = (schema or DEFAULT_SCHEMA).strip()
+        # (Serverzeit, monotonic beim Empfang) — siehe server_now()
+        self._server_time: tuple[datetime, float] | None = None
 
     @property
     def configured(self) -> bool:
@@ -163,6 +167,8 @@ class SupabaseRest:
                 time.sleep(wait)
                 continue
 
+            self._note_server_time(response.headers.get("Date"))
+
             if response.status_code >= 400:
                 raise SupabaseRestError(
                     f"HTTP {response.status_code}: {response.text[:400]}"
@@ -171,6 +177,38 @@ class SupabaseRest:
             return response
 
         raise SupabaseRestError(f"Request failed after {retries} attempts: {last_error}")
+
+    # ── Serverzeit ────────────────────────────────────────────────────
+
+    def _note_server_time(self, date_header: str | None) -> None:
+        """Zeit aus dem HTTP-Date-Header jeder Antwort merken."""
+        if not date_header:
+            return
+        try:
+            parsed = parsedate_to_datetime(date_header)
+        except (TypeError, ValueError):
+            return
+        if parsed is None:
+            return
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        self._server_time = (parsed, time.monotonic())
+
+    def server_now(self) -> datetime | None:
+        """Aktuelle Zeit laut Datenbank-Server, oder None vor der ersten Antwort.
+
+        Auf den Macs darf die Systemuhr bewusst verstellt sein. Jede Zeitrechnung,
+        die zwischen Mac und Datenbank verglichen wird, muss deshalb eine gemeinsame
+        Referenz benutzen — sonst verwirft ein vorgehender Mac jeden Auftrag als
+        abgelaufen, bevor er ihn ausführt.
+
+        Fortgeschrieben wird mit `time.monotonic()`: das läuft weiter, auch wenn
+        jemand die Systemuhr mitten im Betrieb verstellt.
+        """
+        if self._server_time is None:
+            return None
+        base, received_at = self._server_time
+        return base + timedelta(seconds=time.monotonic() - received_at)
 
     # ── Schema ────────────────────────────────────────────────────────
 

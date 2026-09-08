@@ -354,6 +354,53 @@ check("Fenstergrenze ist inklusiv: 09:59-10:30 gehoert zu 08:00",
       _slot_covers_window("09:59-10:30", 8) is True)
 
 
+# ── 10c. Verstellte Systemuhr (Regression zu v1.0.119) ────────────────
+print("\n[10c] Verstellte Systemuhr")
+# Auf den Macs darf die Uhr bewusst falsch stehen. Verfall und Zeitstempel
+# muessen deshalb mit der Zeit der Datenbank rechnen, nicht mit der lokalen —
+# sonst verwirft ein vorgehender Mac jeden Auftrag als "abgelaufen".
+import datetime as _dt
+
+client = remote_agent._client()
+client.select("mac_commands", {"select": "id", "limit": 1})  # Date-Header holen
+
+server_now = client.server_now()
+check("Serverzeit wird aus der Antwort gelesen", server_now is not None)
+check("_now(client) nimmt die Serverzeit",
+      server_now is not None
+      and abs((remote_agent._now(client) - server_now).total_seconds()) < 5)
+
+real_datetime = remote_agent.datetime
+
+
+class ClockAhead(_dt.datetime):
+    """Ein Mac, dessen Systemuhr eine halbe Stunde vorgeht."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return real_datetime.now(tz) + _dt.timedelta(minutes=30)
+
+
+remote_agent.datetime = ClockAhead
+try:
+    local = remote_agent._now()               # ohne Client: lokale Uhr
+    from_server = remote_agent._now(client)   # mit Client: Datenbankuhr
+    check("lokale Uhr geht tatsaechlich vor",
+          (local - from_server).total_seconds() > 1500,
+          (local - from_server).total_seconds())
+    check("_now(client) laesst sich davon nicht beirren",
+          abs((from_server - server_now).total_seconds()) < 60)
+
+    ahead_id = queue("status", ttl_minutes=15)
+    result = remote_agent.poll_once()
+    row = row_by_id(ahead_id)
+    check("Auftrag wird trotz vorgehender Uhr ausgefuehrt",
+          row["status"] == "done", f"{row['status']} / {row.get('error')}")
+    check("nichts faelschlich als abgelaufen verworfen", result["expired"] == 0, result)
+finally:
+    remote_agent.datetime = real_datetime
+
+
 # ── 11. Befehlsliste ──────────────────────────────────────────────────
 print("\n[11] Befehlsliste")
 described = {d["command"]: d["requires_actions"] for d in remote_commands.describe()}

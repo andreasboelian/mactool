@@ -246,9 +246,9 @@ def cmd_list(rest: Rest, namespace) -> int:
         print(f"\nABGEMELDET = kein Lebenszeichen seit über {STALE_AFTER_SECONDS // 60} Minuten.")
     if skewed:
         print(
-            f"\nUHR = Abweichung der Mac-Uhr von der Datenbank. Auffällig: {', '.join(skewed)}. "
-            f"Betrifft nur Zeitstempel, nicht den Betrieb — per Systemeinstellungen "
-            f"„Datum & Uhrzeit automatisch“ geraderücken."
+            f"\nUHR = Abweichung der Mac-Uhr von der Datenbank: {', '.join(skewed)}. "
+            f"Nur zur Kenntnis — Verfall und Status rechnen mit der Zeit der Datenbank, "
+            f"die Systemuhr der Macs darf verstellt bleiben."
         )
     return 0
 
