@@ -29,6 +29,8 @@ from log_uploader import (
     _get_allowed_usernames,
     _get_previous_timeslot,
     _parse_log_timestamp,
+    _previous_window_start_hour,
+    _slot_covers_window,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,22 +128,19 @@ def _timeslot_matches(db_path: Path, slot: str) -> dict:
         finally:
             conn.close()
 
+        window_start_hour = _previous_window_start_hour()
         result["profiles_with_timeslot"] = len(rows)
-        matching = [username for username, slots in rows if slot in (slots or "")]
+        matching = [
+            username
+            for username, slots in rows
+            if _slot_covers_window(slots or "", window_start_hour)
+        ]
         result["matching"] = len(matching)
         result["sample"] = sorted(matching)[:SAMPLE_SIZE]
         if rows and not matching:
-            configured = sorted({slots for _, slots in rows if slots})
-            result["configured_slots"] = configured[:SAMPLE_SIZE]
-            # Der Abgleich ist ein reiner Textvergleich (`slot in time_slot`).
-            # Steht in der Datenbank "00.00-23.59" statt "00:00-23:59", passt
-            # nie etwas — und zwar lautlos, für jeden Account, für immer.
-            if any("." in slots and ":" not in slots for slots in configured):
-                result["hint"] = (
-                    "Die Zeitfenster in der Datenbank benutzen Punkte "
-                    "('00.00-23.59'), verglichen wird aber gegen Doppelpunkte "
-                    f"('{slot}'). Der Textvergleich kann so nie zutreffen."
-                )
+            result["configured_slots"] = sorted({slots for _, slots in rows if slots})[
+                :SAMPLE_SIZE
+            ]
     except Exception as e:
         result["error"] = f"{type(e).__name__}: {e}"
     return result

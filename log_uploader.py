@@ -19,6 +19,8 @@ UPLOAD_DELAY_BETWEEN = 0.5      # seconds between individual uploads
 UPLOAD_DELAY_BETWEEN_BATCHES = 5  # seconds between batches
 RATE_LIMIT_RETRY_DELAY = 10     # seconds to wait before retrying after rate limit
 LOG_TIMESTAMP_RE = re.compile(r"^\[(\d{2})/(\d{2})\s+(\d{2}):(\d{2}):\d{2}\]")
+# "08:00-09:57" und "08.00-09.57" — der Bot schreibt beide Schreibweisen
+SLOT_RANGE_RE = re.compile(r"(\d{1,2})[:.](\d{2})\s*-\s*(\d{1,2})[:.](\d{2})")
 
 # Persists last cleanup date so we only clean up old logs once per day
 _CLEANUP_STATE_FILE = Path(__file__).parent / "log_cleanup_state.json"
@@ -118,12 +120,57 @@ def _get_previous_timeslot() -> str:
     If current time is 12:10, returns "10:00-11:59".
     If current time is 01:30, returns "00:00-01:59".
     If current time is 00:15, returns "22:00-23:59" (previous day's last slot).
+
+    Only for log messages — matching goes through `_slot_covers_window`.
     """
-    now = datetime.now()
-    current_slot_start = (now.hour // 2) * 2
-    prev_slot_start = (current_slot_start - 2) % 24
-    prev_slot_end = prev_slot_start + 1
-    return f"{prev_slot_start:02d}:00-{prev_slot_end:02d}:59"
+    start_hour = _previous_window_start_hour()
+    return f"{start_hour:02d}:00-{start_hour + 1:02d}:59"
+
+
+def _previous_window_start_hour() -> int:
+    """Full hour at which the last completed 2-hour window began."""
+    return ((datetime.now().hour // 2) * 2 - 2) % 24
+
+
+def _parse_slot_ranges(text: str) -> list[tuple[int, int]]:
+    """Read every "HH:MM-HH:MM" range out of a time_slot value, as minutes.
+
+    The bot writes several ranges into one field, comma separated
+    ("00:00-01:57, 12:00-13:57"), and sometimes text instead
+    ("run manually"). Anything that is not a range is ignored.
+
+    A range crossing midnight is split in two, so the caller can compare
+    plain numbers without special cases.
+    """
+    ranges: list[tuple[int, int]] = []
+    for start_h, start_m, end_h, end_m in SLOT_RANGE_RE.findall(text or ""):
+        start = int(start_h) * 60 + int(start_m)
+        end = int(end_h) * 60 + int(end_m)
+        if not (0 <= start < 1440 and 0 <= end < 1440):
+            continue
+        if end >= start:
+            ranges.append((start, end))
+        else:
+            ranges.append((start, 1439))
+            ranges.append((0, end))
+    return ranges
+
+
+def _slot_covers_window(text: str, window_start_hour: int) -> bool:
+    """Does this time_slot value overlap the given 2-hour window?
+
+    Deliberately not a text comparison. The old code built "08:00-09:59" and
+    asked whether that string appeared in the stored value — but the bot stores
+    "08:00-09:57". Two minutes apart, so the test never succeeded, on any mac:
+    the automatic log upload silently uploaded nothing for months, while the
+    manual "Sync Now" (which skips this filter) worked and hid the problem.
+    """
+    window_start = window_start_hour * 60
+    window_end = window_start + 120  # exclusive
+    return any(
+        start < window_end and end >= window_start
+        for start, end in _parse_slot_ranges(text)
+    )
 
 
 def _get_allowed_usernames(db_path: Path, upload_all: bool = False) -> set[str]:
@@ -131,8 +178,8 @@ def _get_allowed_usernames(db_path: Path, upload_all: bool = False) -> set[str]:
 
     Filters:
     1. Device must have 'Phone' in customName
-    2. When upload_all=False (auto-sync): profile's startup_time__time_slot
-       must contain the previous 2h timeslot.
+    2. When upload_all=False (auto-sync): the profile's startup_time__time_slot
+       must overlap the last completed 2h window.
        When upload_all=True (manual "Sync Now"): all Phone usernames are
        returned regardless of timeslot.
 
@@ -141,6 +188,7 @@ def _get_allowed_usernames(db_path: Path, upload_all: bool = False) -> set[str]:
     if upload_all:
         logger.info("upload_all=True — returning ALL Phone usernames (no timeslot filter)")
     else:
+        window_start_hour = _previous_window_start_hour()
         prev_slot = _get_previous_timeslot()
         logger.info(f"Previous timeslot: {prev_slot}")
 
@@ -177,10 +225,10 @@ def _get_allowed_usernames(db_path: Path, upload_all: bool = False) -> set[str]:
         rows = cursor.fetchall()
         conn.close()
 
-        # Filter: only profiles whose time_slot contains the previous slot
+        # Filter: only profiles whose time_slot overlaps the previous window
         usernames = set()
         for username, time_slot in rows:
-            if prev_slot in time_slot:
+            if _slot_covers_window(time_slot, window_start_hour):
                 usernames.add(username)
 
         logger.info(
@@ -317,13 +365,19 @@ def upload_bot_logs(
     # Get allowed usernames (profiles on 'Phone' devices)
     allowed = _get_allowed_usernames(db_path, upload_all=upload_all)
     if not allowed:
+        # Nothing to upload is not a reason to skip the cleanup. The old code
+        # returned here, so while the timeslot filter matched nobody, no old
+        # file was ever deleted either — the bucket still held logs from weeks
+        # back despite a 3-day retention.
         logger.info("No allowed usernames found (no 'Phone' devices)")
+        result["cleaned"] = _cleanup_old_logs(sb_client, server_name)
         return result
 
     # Discover log files
     log_files = _discover_log_files(db_parent_dir)
     if not log_files:
         logger.info("No log files to upload")
+        result["cleaned"] = _cleanup_old_logs(sb_client, server_name)
         return result
 
     # Build list of files to upload (only for allowed usernames)

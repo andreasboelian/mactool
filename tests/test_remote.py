@@ -317,12 +317,41 @@ expected_path = f"mac17/{datetime.now().year}-09-08_0412_creatif_dr.log"
 check("Zielpfad wird gezeigt",
       report["steps"]["timestamps"]["would_upload_as"] == [expected_path],
       report["steps"]["timestamps"]["would_upload_as"])
-# Die Fixture speichert "00.00-23.59" mit Punkten, verglichen wird gegen
-# Doppelpunkte — der Textvergleich kann nie zutreffen, und genau das muss
-# die Diagnose benennen statt es zu verschweigen.
-check("Punkt/Doppelpunkt-Falle wird benannt",
-      "Punkte" in (report["steps"]["timeslot"].get("hint") or ""),
+# Die Fixture speichert "00.00-23.59" (Punkte, ganzer Tag). Das muss jedes
+# Fenster abdecken — mit dem alten Textvergleich tat es das nie.
+check("Zeitfenster des ganzen Tages deckt jedes Fenster ab",
+      report["steps"]["timeslot"]["matching"] == 1,
       report["steps"]["timeslot"])
+
+
+# ── 10b. Zeitfenster-Abgleich (Regression zu v1.0.116) ────────────────
+print("\n[10b] Zeitfenster-Abgleich")
+from log_uploader import _parse_slot_ranges, _slot_covers_window
+
+# Genau der Wert, der auf mac07 in der Datenbank steht. Der alte Code baute
+# "08:00-09:59" und suchte das als Text darin — 2 Minuten daneben, also nie
+# ein Treffer, auf keinem Mac.
+ECHT = "08:00-09:57, 20:00-21:57"
+check("mac07-Wert deckt 08:00-09:59 ab", _slot_covers_window(ECHT, 8) is True, ECHT)
+check("mac07-Wert deckt 20:00-21:59 ab", _slot_covers_window(ECHT, 20) is True, ECHT)
+check("mac07-Wert deckt 10:00-11:59 NICHT ab", _slot_covers_window(ECHT, 10) is False, ECHT)
+check("mac07-Wert deckt 06:00-07:59 NICHT ab", _slot_covers_window(ECHT, 6) is False, ECHT)
+check("alter Textvergleich haette hier versagt", "08:00-09:59" not in ECHT)
+
+check("ganzer Tag deckt alles ab",
+      all(_slot_covers_window("00:00-23:59", h) for h in range(0, 24, 2)))
+check("Punktschreibweise wird gelesen", _slot_covers_window("08.00-09.57", 8) is True)
+check("'run manually' passt zu keinem Fenster",
+      not any(_slot_covers_window("run manually", h) for h in range(0, 24, 2)))
+check("leeres Feld passt zu keinem Fenster", _slot_covers_window("", 8) is False)
+check("Unsinn wirft nicht", _slot_covers_window("99:99-abc", 8) is False)
+check("ueber Mitternacht wird geteilt",
+      _parse_slot_ranges("22:00-01:00") == [(1320, 1439), (0, 60)],
+      _parse_slot_ranges("22:00-01:00"))
+check("Fenstergrenze ist exklusiv: 10:00-11:57 gehoert nicht zu 08:00",
+      _slot_covers_window("10:00-11:57", 8) is False)
+check("Fenstergrenze ist inklusiv: 09:59-10:30 gehoert zu 08:00",
+      _slot_covers_window("09:59-10:30", 8) is True)
 
 
 # ── 11. Befehlsliste ──────────────────────────────────────────────────

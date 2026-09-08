@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.0.116 — 2026-09-08
+- **Fix: der automatische Log-Upload hat seit Monaten nichts hochgeladen — auf allen Macs.**
+  Der Abgleich des Zeitfensters war ein reiner Textvergleich: der Code baute `08:00-09:59`
+  und fragte, ob diese Zeichenkette im gespeicherten Wert vorkommt. Der Bot schreibt aber
+  `08:00-09:57`. **Zwei Minuten** — also nie ein Treffer, für kein Profil, auf keinem Mac
+- Der manuelle Knopf „Sync Now" umgeht diesen Filter (`upload_all=True`) und funktionierte
+  deshalb weiter. Genau das hat den Fehler verdeckt: wer nachsah, sah Dateien im Bucket
+- Verglichen wird jetzt nicht mehr als Text, sondern als Zeitraum: die gespeicherten
+  Bereiche werden gelesen und auf Überschneidung mit dem letzten abgeschlossenen
+  2-Stunden-Fenster geprüft. Mehrere Bereiche pro Feld (`"08:00-09:57, 20:00-21:57"`),
+  Punkt- wie Doppelpunktschreibweise und Bereiche über Mitternacht sind abgedeckt;
+  `"run manually"` passt weiterhin zu keinem Fenster
+- **Fix: bei nichts zu tun wurde auch nicht mehr aufgeräumt.** Fand der Filter keinen
+  Account, stieg `upload_bot_logs` aus, *bevor* die Aufbewahrungsfrist griff. Folge: im
+  Bucket lagen trotz 3-Tage-Frist noch Dateien von vor Wochen (auf mac07 vom 30.07.).
+  Die Bereinigung läuft jetzt auch dann, wenn nichts hochzuladen ist
+- Gefunden mit der Ferndiagnose aus v1.0.115, belegt an den echten Daten von mac07:
+  74 freigegebene Accounts, 72 passende Logdateien, alle mit lesbarem Zeitstempel und
+  fertigem Zielpfad — und trotzdem null Uploads, weil der Textvergleich scheiterte
+- Die Diagnose benutzt jetzt dieselbe Vergleichsfunktion wie der Upload, damit sie nicht
+  wieder etwas anderes behaupten kann als der Code tut
+
 ## v1.0.115 — 2026-09-08
 - **Die Macs lassen sich aus der Ferne befragen.** Bisher war RustDesk der einzige Weg auf
   einen Mac — also Bildschirm gucken statt analysieren, eine Sitzung pro Frage. Jetzt schaut
