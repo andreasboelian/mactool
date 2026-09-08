@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.0.117 — 2026-09-08
+- **`last_seen` stempelt jetzt die Datenbank, nicht der Mac.** Auf mac07 geht die Uhr sieben
+  Minuten nach — dadurch sah jeder Heartbeat abgelaufen aus, obwohl der Mac gerade eben
+  geschrieben hatte. Die Uhr der Datenbank ist die eine Referenz, die alle teilen
+- Die Uhr des Macs steht daneben in der neuen Spalte `agent_clock`. `macctl.py list` zeigt
+  die Abweichung in einer eigenen Spalte an — damit ist eine schiefe Uhr sichtbar statt
+  verwirrend, und man sieht sie überhaupt erst
+- **Voraussetzung: `tools/schema_remote.sql` erneut ausführen** (die Datei ist mehrfach
+  ausführbar). Sie legt `agent_clock` nach und setzt den Trigger. Wirkt sofort, auch für
+  Macs, die noch auf v1.0.115/116 laufen
+- `macctl.py`: `--json` funktioniert jetzt auch *hinter* dem Befehl
+  (`macctl.py mac07 status --json`), nicht nur davor
+- `macctl.py`: die Fortschrittsmeldung geht nach stderr statt in die JSON-Ausgabe — vorher
+  scheiterte jedes Weiterverarbeiten mit `| python3 -m json.tool` an dieser einen Zeile
+
 ## v1.0.116 — 2026-09-08
 - **Fix: der automatische Log-Upload hat seit Monaten nichts hochgeladen — auf allen Macs.**
   Der Abgleich des Zeitfensters war ein reiner Textvergleich: der Code baute `08:00-09:59`

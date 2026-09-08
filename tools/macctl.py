@@ -210,9 +210,10 @@ def cmd_list(rest: Rest, namespace) -> int:
         print(json.dumps(rows, indent=2, ensure_ascii=False))
         return 0
 
-    print(f"{'MAC':<16} {'STATUS':<9} {'GESEHEN':<10} {'VERSION':<24} {'BOT':<6} RUSTDESK")
-    print("-" * 78)
+    print(f"{'MAC':<16} {'STATUS':<11} {'GESEHEN':<10} {'VERSION':<12} {'BOT':<5} {'RUSTDESK':<9} UHR")
+    print("-" * 82)
     stale_found = False
+    skewed = []
     for row in rows:
         seen = parse_timestamp(row.get("last_seen"))
         offline = (
@@ -220,16 +221,35 @@ def cmd_list(rest: Rest, namespace) -> int:
             or (datetime.now(timezone.utc) - seen).total_seconds() > STALE_AFTER_SECONDS
         )
         stale_found = stale_found or offline
+
+        # Abweichung zwischen der Uhr des Macs und der der Datenbank
+        clock = parse_timestamp(row.get("agent_clock"))
+        drift = ""
+        if clock and seen:
+            delta = (clock - seen).total_seconds()
+            if abs(delta) >= 60:
+                drift = f"{delta / 60:+.0f} min"
+                skewed.append(row.get("server_name", "?"))
+            else:
+                drift = "ok"
+
         print(
             f"{row.get('server_name', '?'):<16} "
-            f"{'ABGEMELDET' if offline else 'ok':<9} "
+            f"{'ABGEMELDET' if offline else 'ok':<11} "
             f"{age_text(row.get('last_seen')):<10} "
-            f"{(row.get('version') or '?'):<24} "
-            f"{('an' if row.get('bot_running') else 'aus'):<6} "
-            f"{'an' if row.get('rustdesk_running') else 'aus'}"
+            f"{(row.get('version') or '?'):<12} "
+            f"{('an' if row.get('bot_running') else 'aus'):<5} "
+            f"{('an' if row.get('rustdesk_running') else 'aus'):<9} "
+            f"{drift}"
         )
     if stale_found:
         print(f"\nABGEMELDET = kein Lebenszeichen seit über {STALE_AFTER_SECONDS // 60} Minuten.")
+    if skewed:
+        print(
+            f"\nUHR = Abweichung der Mac-Uhr von der Datenbank. Auffällig: {', '.join(skewed)}. "
+            f"Betrifft nur Zeitstempel, nicht den Betrieb — per Systemeinstellungen "
+            f"„Datum & Uhrzeit automatisch“ geraderücken."
+        )
     return 0
 
 
@@ -320,9 +340,12 @@ def cmd_send(rest: Rest, namespace) -> int:
     targets = resolve_targets(rest, namespace.target)
     args = collect_args(namespace.extra, namespace)
 
+    # Auf stderr: sonst steht die Zeile mitten im JSON und `| python3 -m json.tool`
+    # scheitert an ihr.
     print(
         f"Sende '{namespace.command}' an {', '.join(targets)} "
-        f"(Wartezeit {namespace.wait}s, Gültigkeit {namespace.ttl})..."
+        f"(Wartezeit {namespace.wait}s, Gültigkeit {namespace.ttl})...",
+        file=sys.stderr,
     )
 
     with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
@@ -364,12 +387,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Rohausgabe als JSON")
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
-    sub.add_parser("list", help="Welche Macs melden sich (Heartbeat)").set_defaults(func=cmd_list)
+    # `--json` soll vor *und* hinter dem Befehl funktionieren. SUPPRESS ist hier
+    # wesentlich: ohne das setzt der Unterparser das Feld auf seinen Default
+    # zurueck und ueberschreibt damit ein vorangestelltes --json wieder mit False.
+    def add_json(target):
+        target.add_argument(
+            "--json", action="store_true", default=argparse.SUPPRESS,
+            help="Rohausgabe als JSON",
+        )
+
+    list_parser = sub.add_parser("list", help="Welche Macs melden sich (Heartbeat)")
+    add_json(list_parser)
+    list_parser.set_defaults(func=cmd_list)
+
     sub.add_parser("commands", help="Verfügbare Befehle anzeigen").set_defaults(func=cmd_commands)
     sub.add_parser("pending", help="Offene Befehle aller Macs").set_defaults(func=cmd_pending)
 
     result_parser = sub.add_parser("result", help="Ergebnis eines Befehls nachträglich abholen")
     result_parser.add_argument("command_id", type=int)
+    add_json(result_parser)
     result_parser.set_defaults(func=cmd_result)
 
     send = sub.add_parser("send", help="Befehl schicken (auch ohne 'send' aufrufbar)")
@@ -391,6 +427,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="sync: nur das letzte Zeitfenster statt aller Logs")
     send.add_argument("--check-updates", action="store_true",
                       help="status: auch GitHub abfragen (langsamer)")
+    add_json(send)
     send.set_defaults(func=cmd_send)
 
     return parser

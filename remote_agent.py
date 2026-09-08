@@ -202,7 +202,9 @@ def _heartbeat(client: SupabaseRest, config) -> None:
             [
                 {
                     "server_name": config.server_name,
-                    "last_seen": _now().isoformat(),
+                    # last_seen stempelt die Datenbank (Trigger). Ginge die Uhr des
+                    # Macs nach, sähe sonst jeder frische Heartbeat abgelaufen aus.
+                    "agent_clock": _now().isoformat(),
                     "version": get_current_version(),
                     "hostname": socket.gethostname(),
                     "platform": platform.platform(),

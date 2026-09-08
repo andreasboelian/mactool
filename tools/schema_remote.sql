@@ -35,6 +35,7 @@ create index if not exists mac_commands_pending_idx
 create table if not exists public.mac_agents (
   server_name      text primary key,
   last_seen        timestamptz not null default now(),
+  agent_clock      timestamptz,   -- was die Uhr des Macs selbst sagt
   version          text,
   hostname         text,
   platform         text,
@@ -43,6 +44,27 @@ create table if not exists public.mac_agents (
   actions_allowed  boolean,
   last_runs        jsonb
 );
+
+-- Nachtrag fuer Installationen, die die erste Fassung schon ausgefuehrt haben
+alter table public.mac_agents add column if not exists agent_clock timestamptz;
+
+-- last_seen kommt von der Datenbank, nicht vom Mac. Auf mac07 ging die Uhr
+-- sieben Minuten nach — jeder Heartbeat sah dadurch abgelaufen aus, obwohl der
+-- Mac gerade eben geschrieben hatte. Die Uhr der Datenbank ist die eine
+-- Referenz, die alle teilen; die Mac-Uhr steht daneben in agent_clock und macht
+-- eine Abweichung damit sichtbar statt verwirrend.
+create or replace function public.mac_agents_stamp_last_seen()
+returns trigger language plpgsql as $$
+begin
+  new.last_seen := now();
+  return new;
+end;
+$$;
+
+drop trigger if exists mac_agents_stamp on public.mac_agents;
+create trigger mac_agents_stamp
+  before insert or update on public.mac_agents
+  for each row execute function public.mac_agents_stamp_last_seen();
 
 -- ── Zugriff ───────────────────────────────────────────────────────────
 -- RLS an, aber bewusst *ohne* Policy: der service_role-Key (den die Macs und
