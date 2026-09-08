@@ -202,8 +202,13 @@ def _heartbeat(client: SupabaseRest, config) -> None:
             [
                 {
                     "server_name": config.server_name,
-                    # last_seen stempelt die Datenbank (Trigger). Ginge die Uhr des
-                    # Macs nach, sähe sonst jeder frische Heartbeat abgelaufen aus.
+                    # Beides senden, mit Absicht: normalerweise überschreibt der
+                    # Trigger last_seen mit der Zeit der Datenbank (die Mac-Uhr kann
+                    # nachgehen — auf mac07 um sieben Minuten). Fehlt der Trigger,
+                    # weil das SQL noch nicht eingespielt ist, bleibt wenigstens die
+                    # Mac-Zeit stehen. Schickten wir last_seen gar nicht, behielte
+                    # der Upsert beim Aktualisieren den alten Wert für immer bei.
+                    "last_seen": _now().isoformat(),
                     "agent_clock": _now().isoformat(),
                     "version": get_current_version(),
                     "hostname": socket.gethostname(),

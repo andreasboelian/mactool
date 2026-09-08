@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.118 — 2026-09-08
+- **Fix zu v1.0.117: der Heartbeat braucht das neue SQL nicht mehr zwingend.** v1.0.117
+  schickte nur noch `agent_clock` und überließ `last_seen` dem Trigger. War das SQL noch
+  nicht eingespielt, kannte die Tabelle die Spalte nicht — der Upsert ließ sie weg und
+  `last_seen` wäre beim Aktualisieren für immer auf dem alten Wert stehen geblieben
+- Jetzt werden beide Werte geschickt: mit Trigger gewinnt die Zeit der Datenbank, ohne
+  Trigger bleibt wenigstens die Mac-Zeit stehen. Das SQL bleibt empfohlen, ist aber keine
+  Bedingung mehr dafür, dass sich ein Mac überhaupt meldet
+
 ## v1.0.117 — 2026-09-08
 - **`last_seen` stempelt jetzt die Datenbank, nicht der Mac.** Auf mac07 geht die Uhr sieben
   Minuten nach — dadurch sah jeder Heartbeat abgelaufen aus, obwohl der Mac gerade eben
