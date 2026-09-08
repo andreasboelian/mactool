@@ -366,7 +366,7 @@ def cmd_commands(rest: Rest, namespace) -> int:
     """Was der Mac annimmt — die Liste steht in remote_commands.HANDLERS."""
     print("Lesend:   status  config  logs  files  diag-upload  diag-db  versions  legacy-upload")
     print("Eingreifend (brauchen remote_allow_actions):")
-    print("          sync  customer-stats  bot  rustdesk  update")
+    print("          sync  cleanup  customer-stats  bot  rustdesk  update")
     print()
     print("Beispiele:")
     print("  macctl.py mac07 diag-upload")
@@ -375,6 +375,7 @@ def cmd_commands(rest: Rest, namespace) -> int:
     print("  macctl.py mac07 bot --action restart")
     print("  macctl.py mac07 update --version v1.0.115")
     print("  macctl.py mac07 sync --wait 600")
+    print("  macctl.py all cleanup           # alte Logs im Bucket sofort wegraeumen")
     return 0
 
 

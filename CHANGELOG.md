@@ -1,6 +1,9 @@
 # Changelog
 
 ## v1.0.120 — 2026-09-08
+- Neuer Befehl `cleanup`: stösst die Bucket-Bereinigung sofort an, statt auf den Tageslauf
+  zu warten. Ohne den wäre der Rückstand aus dem Zukunftsdaten-Fehler bis zum nächsten Tag
+  liegen geblieben — `macctl.py all cleanup`
 - **Fix: hochgeladene Logs bekamen Daten in der Zukunft.** In der Logzeile steht nur
   `[MM/TT HH:MM:SS]`, das Jahr fehlt. Bisher wurde immer das laufende Jahr angenommen und
   nur der Fall Dezember/Januar korrigiert. In den Logverzeichnissen liegen aber Dateien von

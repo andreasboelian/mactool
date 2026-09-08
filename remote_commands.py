@@ -177,6 +177,35 @@ def _cmd_sync(args: dict) -> dict:
     return trigger_sync(upload_all_logs=True if upload_all is None else bool(upload_all))
 
 
+def _cmd_cleanup(args: dict) -> dict:
+    """Alte Logs im Bucket sofort wegräumen, ohne auf den Tageslauf zu warten.
+
+    Der normale Lauf ist auf einmal täglich gedrosselt. Nach einer Regeländerung
+    wäre der Rückstand sonst bis zum nächsten Tag stehen geblieben.
+    """
+    from device_monitor import _get_sb_client
+    from log_uploader import RETENTION_DAYS, _cleanup_old_logs
+
+    client = _get_sb_client()
+    if client is None:
+        raise CommandError("kein Supabase-Client (Key fehlt?)")
+
+    retention = int(args.get("retention_days") or RETENTION_DAYS)
+    server_name = get_config().server_name
+
+    # Ein Durchlauf listet höchstens 1000 Objekte. Solange etwas gelöscht wird,
+    # kann noch mehr dahinterliegen — also wiederholen, aber begrenzt.
+    total, rounds = 0, 0
+    while rounds < 10:
+        removed = _cleanup_old_logs(client, server_name, retention, force=True)
+        total += removed
+        rounds += 1
+        if removed == 0:
+            break
+
+    return {"deleted": total, "rounds": rounds, "retention_days": retention}
+
+
 def _cmd_customer_stats(args: dict) -> dict:
     from customer_stats import run_customer_stats_upload
 
@@ -256,6 +285,7 @@ HANDLERS: dict[str, tuple] = {
     "versions": (_cmd_versions, False),
     "legacy-upload": (_cmd_legacy_upload, False),
     "sync": (_cmd_sync, True),
+    "cleanup": (_cmd_cleanup, True),
     "customer-stats": (_cmd_customer_stats, True),
     "bot": (_cmd_bot, True),
     "rustdesk": (_cmd_rustdesk, True),

@@ -384,6 +384,44 @@ check("Datei von 2024 wird als 2024 hochgeladen",
       _parse_log_timestamp(old_log))
 old_log.write_text("[09/08 04:12:33] start\n")  # Fixture wiederherstellen
 
+# Die Bereinigung muss Zukunftsdaten mitnehmen — sonst bleiben die vor dem Fix
+# entstandenen Dateien fuer immer liegen (mac04 hatte 640 davon).
+from datetime import timedelta as _TD
+from log_uploader import _cleanup_old_logs
+
+deleted = []
+
+
+class FakeBucket:
+    def list(self, prefix, options=None):
+        return [{"name": n} for n in (
+            f"{(_DT.now() - _TD(days=30)):%Y-%m-%d}_1200_alt.log",
+            f"{(_DT.now() - _TD(days=1)):%Y-%m-%d}_1200_frisch.log",
+            f"{(_DT.now() + _TD(days=110)):%Y-%m-%d}_1200_zukunft.log",
+            "kaputt.log",
+        )]
+
+    def remove(self, paths):
+        deleted.extend(paths)
+
+
+class FakeStorage:
+    def from_(self, bucket):
+        return FakeBucket()
+
+
+class FakeClient:
+    storage = FakeStorage()
+
+
+count = _cleanup_old_logs(FakeClient(), "mac17", force=True)
+names = [p.split("/", 1)[1] for p in deleted]
+check("altes Log wird geloescht", any("alt.log" in n for n in names), names)
+check("Zukunftsdatum wird geloescht", any("zukunft.log" in n for n in names), names)
+check("frisches Log bleibt", not any("frisch.log" in n for n in names), names)
+check("unlesbarer Name wird nicht angefasst", not any("kaputt" in n for n in names), names)
+check("Anzahl stimmt", count == 2, count)
+
 
 # ── 10c. Verstellte Systemuhr (Regression zu v1.0.119) ────────────────
 print("\n[10c] Verstellte Systemuhr")

@@ -326,13 +326,19 @@ def _upload_log_file(client: Client, file_path: Path, storage_path: str) -> bool
     return False
 
 
-def _cleanup_old_logs(client: Client, server_name: str, retention_days: int = RETENTION_DAYS) -> int:
+def _cleanup_old_logs(
+    client: Client,
+    server_name: str,
+    retention_days: int = RETENTION_DAYS,
+    force: bool = False,
+) -> int:
     """Delete log files older than retention_days from the bucket.
 
     Runs at most once per day (gated by _CLEANUP_STATE_FILE) to avoid listing
-    and deleting on every sync cycle.
+    and deleting on every sync cycle. `force=True` ignores that gate — needed
+    when a rule changed and the backlog should not wait until tomorrow.
     """
-    if not _should_run_cleanup():
+    if not force and not _should_run_cleanup():
         logger.debug("Log cleanup already ran today, skipping")
         return 0
 
