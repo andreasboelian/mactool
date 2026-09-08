@@ -366,7 +366,7 @@ def cmd_commands(rest: Rest, namespace) -> int:
     """Was der Mac annimmt — die Liste steht in remote_commands.HANDLERS."""
     print("Lesend:   status  config  logs  files  diag-upload  diag-db  versions  legacy-upload")
     print("Eingreifend (brauchen remote_allow_actions):")
-    print("          sync  cleanup  customer-stats  bot  rustdesk  update")
+    print("          sync  cleanup  set  customer-stats  bot  rustdesk  update")
     print()
     print("Beispiele:")
     print("  macctl.py mac07 diag-upload")
@@ -376,6 +376,12 @@ def cmd_commands(rest: Rest, namespace) -> int:
     print("  macctl.py mac07 update --version v1.0.115")
     print("  macctl.py mac07 sync --wait 600")
     print("  macctl.py all cleanup           # alte Logs im Bucket sofort wegraeumen")
+    print("  macctl.py mac08 set sync_times=00:10,02:10,04:10,06:10,08:10,10:10,\\")
+    print("                        12:10,14:10,16:10,18:10,20:10,22:10")
+    print("  macctl.py all set alert_smtp_host=smtp.example.de alert_smtp_port=587")
+    print()
+    print("Nicht setzbar (bewusst): supabase_key, customer_stats_key,")
+    print("customer_users_key, alert_smtp_password, webhook_url, server_name.")
     return 0
 
 

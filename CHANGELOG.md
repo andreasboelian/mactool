@@ -1,9 +1,37 @@
 # Changelog
 
-## v1.0.120 — 2026-09-08
-- Neuer Befehl `cleanup`: stösst die Bucket-Bereinigung sofort an, statt auf den Tageslauf
+## v1.0.122 — 2026-09-08
+- **Neuer Befehl `set`: Einstellungen lassen sich aus der Ferne ändern.** Damit ist eine
+  Korrektur an 13 Macs ein Befehl statt 13 RustDesk-Sitzungen —
+  `macctl.py mac08 set sync_times=00:10,02:10,…`
+- Bewusst **nicht** setzbar: `supabase_key`, `customer_stats_key`, `customer_users_key`,
+  `alert_smtp_password`, `webhook_url` — Keys und Passwörter bleiben dem Dashboard
+  vorbehalten. Ebenso `server_name`: den zu ändern hieße, den Mac von der Fernsteuerung
+  abzuschneiden, und zurück ginge es nur noch per RustDesk
+- Werte werden vor dem Speichern geprüft: Uhrzeiten auf `HH:MM`, Zahlen auf Zahlen,
+  ja/nein auf beides, Aufzählungen auf ihre erlaubten Werte. Ein leerer `sync_times` wird
+  abgelehnt, weil danach überhaupt kein Upload mehr liefe
+- **Fix: geänderte Upload-Zeiten wirkten erst nach einem Neustart** — auch die über das
+  Dashboard. Bis dahin lief still der alte Zeitplan weiter. Die Termine werden jetzt sofort
+  neu aufgebaut, gestrichene Zeitpunkte dabei entfernt
+- **Die Diagnose prüft jetzt auch den Zeitplan.** Ein Lauf lädt immer nur das zuletzt
+  abgeschlossene 2-Stunden-Fenster hoch. Läuft der Sync nicht alle zwei Stunden, fehlen die
+  Logs der übersprungenen Fenster dauerhaft — auf mac08 stand der Standardzeitplan
+  (09:00, 14:30), also 2 von 12 Fenstern abgedeckt und zehn Fenster für immer verloren
+- Solche Fälle erscheinen als `warnings` und stehen mit „ACHTUNG" im Urteil. Vorher meldete
+  die Diagnose „kein blockierendes Glied gefunden" — richtig, aber irreführend: die Kette
+  war heil, der Zeitplan nicht
+
+## v1.0.121 — 2026-09-08
+- Neuer Befehl `cleanup`: stößt die Bucket-Bereinigung sofort an, statt auf den Tageslauf
   zu warten. Ohne den wäre der Rückstand aus dem Zukunftsdaten-Fehler bis zum nächsten Tag
   liegen geblieben — `macctl.py all cleanup`
+- Hinweis zur Tag-Hygiene: v1.0.120 war zu diesem Zeitpunkt bereits auf allen Macs
+  ausgecheckt. Ein gepushter Tag darf deshalb nicht verschoben werden — `git fetch --tags`
+  zieht ihn auf den Macs nicht nach, sie blieben stumm auf dem alten Stand. Nachträge
+  bekommen eine neue Nummer
+
+## v1.0.120 — 2026-09-08
 - **Fix: hochgeladene Logs bekamen Daten in der Zukunft.** In der Logzeile steht nur
   `[MM/TT HH:MM:SS]`, das Jahr fehlt. Bisher wurde immer das laufende Jahr angenommen und
   nur der Fall Dezember/Januar korrigiert. In den Logverzeichnissen liegen aber Dateien von

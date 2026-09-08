@@ -1722,6 +1722,14 @@ async def update_config(update: ConfigUpdate):
         config.save()
         logger.info("Configuration updated")
 
+        # Ohne das wirkten geänderte Upload-Zeiten erst nach einem Neustart des
+        # Dienstes — und bis dahin lief still der alte Zeitplan weiter.
+        if update.sync_times is not None:
+            try:
+                get_scheduler().reload_sync_jobs()
+            except Exception as e:
+                logger.error(f"Upload-Termine konnten nicht neu gesetzt werden: {e}")
+
         return {
             "status": "updated",
             "config": {

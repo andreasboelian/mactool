@@ -191,6 +191,49 @@ def _bucket_state(server_name: str) -> dict:
     return state
 
 
+def _schedule_coverage(sync_times: list[str]) -> dict:
+    """Deckt der Sync-Zeitplan alle zwölf 2-Stunden-Fenster ab?
+
+    Ein Lauf lädt immer nur das *zuletzt abgeschlossene* Fenster hoch. Läuft der
+    Sync nicht alle zwei Stunden, werden die Logs der übersprungenen Fenster nie
+    hochgeladen — und zwar endgültig, denn beim nächsten Lauf ist ein anderes
+    Fenster an der Reihe.
+
+    Auf mac08 stand der Standardzeitplan (09:00, 14:30): zwei von zwölf Fenstern
+    abgedeckt, die Logs der übrigen zehn fehlten dauerhaft. Die Upload-Kette war
+    dabei völlig in Ordnung — deshalb fiel es keiner Prüfung auf.
+    """
+    covered = set()
+    unreadable = []
+    for entry in sync_times or []:
+        try:
+            hour, minute = (int(part) for part in str(entry).split(":", 1))
+        except (ValueError, TypeError):
+            unreadable.append(entry)
+            continue
+        covered.add(((hour // 2) * 2 - 2) % 24)
+
+    all_windows = set(range(0, 24, 2))
+    missing = sorted(all_windows - covered)
+
+    result = {
+        "sync_times": list(sync_times or []),
+        "windows_total": len(all_windows),
+        "windows_covered": len(covered & all_windows),
+        "windows_missing": [f"{h:02d}:00-{h + 1:02d}:59" for h in missing],
+    }
+    if unreadable:
+        result["unreadable"] = unreadable
+    if missing:
+        result["hint"] = (
+            f"Für {len(missing)} von {len(all_windows)} Zeitfenstern läuft nie ein Sync — "
+            f"die Logs dieser Stunden werden nie hochgeladen. Ein Lauf deckt immer nur das "
+            f"zuletzt abgeschlossene Fenster ab, deshalb muss der Zeitplan alle zwei "
+            f"Stunden greifen (üblich hier: 00:10, 02:10, … 22:10)."
+        )
+    return result
+
+
 def diagnose_log_upload() -> dict:
     """Die komplette Upload-Kette durchgehen und das erste blockierende Glied nennen.
 
@@ -202,10 +245,16 @@ def diagnose_log_upload() -> dict:
     config = get_config()
     steps: dict = {}
     blocking: list[str] = []
+    warnings: list[str] = []
     temp_db: Path | None = None
 
     def block(step: str, message: str) -> None:
         blocking.append(step)
+        steps[step]["verdict"] = message
+
+    def warn(step: str, message: str) -> None:
+        """Die Kette laeuft, aber unvollstaendig — auch das darf nicht stumm bleiben."""
+        warnings.append(step)
         steps[step]["verdict"] = message
 
     try:
@@ -221,6 +270,16 @@ def diagnose_log_upload() -> dict:
         }
         if not config.supabase_key:
             block("config", "Kein Supabase-Key hinterlegt — es kann nichts hochgeladen werden.")
+
+        # ── 1b. Deckt der Zeitplan alle Fenster ab? ───────────────────
+        steps["schedule"] = _schedule_coverage(config.sync_times)
+        if steps["schedule"]["windows_missing"]:
+            warn(
+                "schedule",
+                f"Der Sync-Zeitplan deckt nur {steps['schedule']['windows_covered']} von "
+                f"{steps['schedule']['windows_total']} Zeitfenstern ab — die Logs der "
+                f"übrigen werden nie hochgeladen.",
+            )
 
         # ── 2. Datenbank ──────────────────────────────────────────────
         steps["database"] = {"path": str(db_path), "exists": db_path.exists()}
@@ -267,7 +326,7 @@ def diagnose_log_upload() -> dict:
         # Ohne lesbare Datenbank sind die folgenden Schritte nicht auswertbar
         if not db_path.exists():
             steps["verdict_note"] = "Weitere Schritte übersprungen: keine Datenbank."
-            return _finish(config, steps, blocking)
+            return _finish(config, steps, blocking, warnings)
 
         temp_db = _copy_db(db_path)
 
@@ -373,11 +432,13 @@ def diagnose_log_upload() -> dict:
             except Exception as e:
                 logger.debug(f"Arbeitskopie {temp_db} nicht gelöscht: {e}")
 
-    return _finish(config, steps, blocking)
+    return _finish(config, steps, blocking, warnings)
 
 
-def _finish(config, steps: dict, blocking: list[str]) -> dict:
+def _finish(config, steps: dict, blocking: list[str], warnings: list[str] | None = None) -> dict:
     """Aus den Einzelschritten ein Urteil in einem Satz bauen."""
+    warnings = warnings or []
+
     if steps.get("error"):
         verdict = f"Diagnose unvollständig: {steps['error']}"
     elif not blocking:
@@ -390,11 +451,18 @@ def _finish(config, steps: dict, blocking: list[str]) -> dict:
         if len(blocking) > 1:
             verdict += f" (zusätzlich betroffen: {', '.join(blocking[1:])})"
 
+    # Eine Warnung heisst: es laeuft, aber nicht vollstaendig. Das gehoert in
+    # denselben Satz — sonst liest man "kein blockierendes Glied" und haelt alles
+    # fuer gesund, waehrend zehn von zwoelf Zeitfenstern nie hochgeladen werden.
+    for step in warnings:
+        verdict += f"  ACHTUNG: {steps[step]['verdict']}"
+
     return {
         "server_name": config.server_name,
         "checked_at": datetime.now().isoformat(timespec="seconds"),
         "verdict": verdict,
         "blocking": blocking,
+        "warnings": warnings,
         "steps": steps,
     }
 

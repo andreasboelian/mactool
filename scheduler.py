@@ -202,6 +202,21 @@ class SchedulerManager:
         except Exception as e:
             logger.error(f"Failed to stop scheduler: {e}")
 
+    def reload_sync_jobs(self) -> list[str]:
+        """Die Upload-Termine neu aus der Konfiguration aufbauen.
+
+        Ohne das wirkte eine Änderung an `sync_times` erst nach einem Neustart des
+        Dienstes — auch die über das Dashboard. Alte Termine müssen dabei entfernt
+        werden: `replace_existing` ersetzt nur gleichnamige Jobs, ein gestrichener
+        Zeitpunkt liefe sonst weiter.
+        """
+        for job in self.scheduler.get_jobs():
+            if job.id.startswith("sync_"):
+                self.scheduler.remove_job(job.id)
+
+        self._register_sync_jobs()
+        return [job.id for job in self.scheduler.get_jobs() if job.id.startswith("sync_")]
+
     def trigger_sync_now(self):
         """Trigger sync immediately."""
         logger.info("Triggering sync immediately...")

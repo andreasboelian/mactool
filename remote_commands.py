@@ -13,7 +13,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from config import get_config, masked_config_dict
+from config import SECRET_FIELDS, get_config, masked_config_dict
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +177,137 @@ def _cmd_sync(args: dict) -> dict:
     return trigger_sync(upload_all_logs=True if upload_all is None else bool(upload_all))
 
 
+# Diese Felder lassen sich aus der Ferne NICHT setzen.
+#   server_name — der Mac holt seine Aufträge über genau diesen Namen ab. Wer ihn
+#                 ändert, schneidet den Mac von der Fernsteuerung ab; zurück ginge
+#                 es nur noch per RustDesk.
+#   SECRET_FIELDS — Keys und Passwörter bleiben dem Dashboard vorbehalten.
+UNSETTABLE = frozenset({"server_name"}) | SECRET_FIELDS
+
+TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def _coerce(name: str, value, field_type):
+    """Einen übergebenen Wert auf den Typ des Konfigurationsfeldes bringen."""
+    if field_type is bool:
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in ("true", "1", "ja", "an", "yes", "on"):
+            return True
+        if text in ("false", "0", "nein", "aus", "no", "off"):
+            return False
+        raise CommandError(f"'{name}' erwartet ja/nein, bekam {value!r}")
+
+    if field_type is int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise CommandError(f"'{name}' erwartet eine Zahl, bekam {value!r}")
+
+    if field_type == list[str]:
+        if isinstance(value, str):
+            value = [part.strip() for part in value.split(",") if part.strip()]
+        if not isinstance(value, list):
+            raise CommandError(f"'{name}' erwartet eine Liste, bekam {value!r}")
+        return [str(item) for item in value]
+
+    return str(value)
+
+
+def _validate(name: str, value):
+    """Werte prüfen, deren Unsinn erst Stunden später auffiele."""
+    if name == "sync_times":
+        if not value:
+            raise CommandError("sync_times darf nicht leer sein — sonst läuft kein Upload mehr")
+        bad = [t for t in value if not TIME_RE.match(t)]
+        if bad:
+            raise CommandError(f"Ungültige Uhrzeit(en) in sync_times: {', '.join(bad)} (Format HH:MM)")
+
+    if name == "remote_poll_seconds" and value < 5:
+        raise CommandError("remote_poll_seconds unter 5 ist nur Last ohne Nutzen")
+
+    if name == "customer_stats_source" and value not in ("sessions", "superdb"):
+        raise CommandError("customer_stats_source muss 'sessions' oder 'superdb' sein")
+
+    if name == "alert_smtp_security" and value not in ("starttls", "ssl", "none"):
+        raise CommandError("alert_smtp_security muss 'starttls', 'ssl' oder 'none' sein")
+
+    if name == "alert_smtp_port" and not 1 <= value <= 65535:
+        raise CommandError("alert_smtp_port muss zwischen 1 und 65535 liegen")
+
+
+def _cmd_set(args: dict) -> dict:
+    """Konfigurationsfelder aus der Ferne setzen.
+
+    Keys und Passwörter sind bewusst ausgenommen — die gehören ins Dashboard.
+    Ebenso `server_name`: den zu ändern hieße, den Mac von der Fernsteuerung
+    abzuschneiden.
+    """
+    from dataclasses import fields as dataclass_fields
+
+    from config import AppConfig
+
+    if not args:
+        raise CommandError("Nichts zu setzen — erwartet wird feld=wert")
+
+    types = {f.name: f.type for f in dataclass_fields(AppConfig)}
+    config = get_config()
+
+    unknown = sorted(set(args) - set(types))
+    if unknown:
+        raise CommandError(
+            f"Unbekannte Felder: {', '.join(unknown)}. "
+            f"Bekannt sind: {', '.join(sorted(types))}"
+        )
+
+    blocked = sorted(set(args) & UNSETTABLE)
+    if blocked:
+        raise CommandError(
+            f"Aus der Ferne nicht setzbar: {', '.join(blocked)}. "
+            f"Keys, Passwörter und der Servername gehören ins Dashboard."
+        )
+
+    changed = {}
+    for name, raw in args.items():
+        value = _coerce(name, raw, types[name])
+        _validate(name, value)
+        before = getattr(config, name)
+        if before == value:
+            continue
+        setattr(config, name, value)
+        changed[name] = {"vorher": before, "nachher": value}
+
+    if not changed:
+        return {"changed": {}, "note": "Alle Werte standen bereits so"}
+
+    config.save()
+    logger.info(f"Fernzugriff hat Konfiguration geändert: {sorted(changed)}")
+
+    result = {"changed": changed}
+
+    # sync_times wirkte bisher erst nach einem Neustart — jetzt sofort
+    if "sync_times" in changed:
+        from scheduler import get_scheduler
+
+        result["sync_jobs"] = get_scheduler().reload_sync_jobs()
+
+    # Diese wirken erst beim nächsten Start des Dienstes
+    needs_restart = sorted(
+        name for name in changed
+        if name in ("remote_poll_seconds", "remote_control_enabled",
+                    "device_check_interval_hours", "bot_check_interval_minutes",
+                    "rustdesk_check_interval_minutes")
+    )
+    if needs_restart:
+        result["needs_restart"] = needs_restart
+        result["note"] = (
+            f"Wirksam erst nach einem Neustart des Dienstes: {', '.join(needs_restart)}"
+        )
+
+    return result
+
+
 def _cmd_cleanup(args: dict) -> dict:
     """Alte Logs im Bucket sofort wegräumen, ohne auf den Tageslauf zu warten.
 
@@ -286,6 +417,7 @@ HANDLERS: dict[str, tuple] = {
     "legacy-upload": (_cmd_legacy_upload, False),
     "sync": (_cmd_sync, True),
     "cleanup": (_cmd_cleanup, True),
+    "set": (_cmd_set, True),
     "customer-stats": (_cmd_customer_stats, True),
     "bot": (_cmd_bot, True),
     "rustdesk": (_cmd_rustdesk, True),

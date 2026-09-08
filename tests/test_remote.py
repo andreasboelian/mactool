@@ -470,12 +470,86 @@ finally:
     remote_agent.datetime = real_datetime
 
 
+# ── 10d. Konfiguration setzen (v1.0.122) ──────────────────────────────
+print("\n[10d] Konfiguration aus der Ferne setzen")
+cfg.remote_allow_actions = True
+
+
+def try_set(**kwargs):
+    try:
+        return True, remote_commands.execute("set", kwargs)
+    except remote_commands.CommandError as e:
+        return False, str(e)
+
+
+ok, res = try_set(sync_times="00:10,02:10,04:10")
+check("Zeitplan wird gesetzt", ok and cfg.sync_times == ["00:10", "02:10", "04:10"], res)
+check("Termine werden sofort neu aufgebaut",
+      ok and len(res.get("sync_jobs", [])) == 3, res)
+check("boolescher Wert aus Text", try_set(customer_stats_enabled="ja")[0] and cfg.customer_stats_enabled)
+
+# Was NICHT gehen darf — sonst waere die Queue ein Weg, Geheimnisse zu ersetzen
+# oder einen Mac unerreichbar zu machen
+before_key = cfg.supabase_key
+for field in ("supabase_key", "customer_stats_key", "customer_users_key",
+              "alert_smtp_password", "webhook_url", "server_name"):
+    ok, message = try_set(**{field: "eingeschleust"})
+    check(f"'{field}' ist nicht setzbar", not ok and "nicht setzbar" in message, message)
+check("Key blieb unveraendert", cfg.supabase_key == before_key)
+check("Servername blieb unveraendert", cfg.server_name == "mac17")
+
+for label, kwargs in (
+    ("unbekanntes Feld", {"gibt_es_nicht": 1}),
+    ("kaputte Uhrzeit", {"sync_times": "25:99"}),
+    ("leerer Zeitplan", {"sync_times": ""}),
+    ("Text statt Zahl", {"alert_smtp_port": "abc"}),
+    ("unerlaubte Verschluesselung", {"alert_smtp_security": "quatsch"}),
+    ("zu kurzes Poll-Intervall", {"remote_poll_seconds": 1}),
+):
+    ok, message = try_set(**kwargs)
+    check(f"{label} wird abgelehnt", not ok, message)
+
+check("Zeitplan nach den Fehlversuchen unveraendert",
+      cfg.sync_times == ["00:10", "02:10", "04:10"], cfg.sync_times)
+
+# Gesperrte Aktionen muessen auch 'set' sperren
+cfg.remote_allow_actions = False
+ok, message = try_set(log_level="DEBUG")
+cfg.remote_allow_actions = True
+check("'set' ist bei gesperrten Aktionen tabu",
+      not ok and "remote_allow_actions" in message, message)
+
+
+# ── 10e. Zeitplan-Abdeckung (der mac08-Fall) ──────────────────────────
+print("\n[10e] Zeitplan deckt alle Fenster ab?")
+coverage = diagnostics._schedule_coverage(["09:00", "14:30"])
+check("Standardzeitplan deckt nur 2 von 12 Fenstern",
+      coverage["windows_covered"] == 2 and len(coverage["windows_missing"]) == 10, coverage)
+check("Hinweis nennt die Folge",
+      "nie hochgeladen" in (coverage.get("hint") or ""), coverage.get("hint"))
+
+full = diagnostics._schedule_coverage([f"{h:02d}:10" for h in range(0, 24, 2)])
+check("12x-Zeitplan laesst kein Fenster aus", full["windows_missing"] == [], full)
+check("kein Hinweis wenn alles passt", "hint" not in full, full)
+check("unlesbare Eintraege werden benannt",
+      diagnostics._schedule_coverage(["quatsch"]).get("unreadable") == ["quatsch"])
+
+# Die Warnung muss im Urteil landen — sonst liest man "kein blockierendes Glied"
+# und haelt einen Mac fuer gesund, dem zehn Fenster fehlen.
+cfg.sync_times = ["09:00", "14:30"]
+report = diagnostics.diagnose_log_upload()
+check("Warnung steht im Urteil", "ACHTUNG" in report["verdict"], report["verdict"][:160])
+check("'schedule' als Warnung gefuehrt", "schedule" in report.get("warnings", []), report.get("warnings"))
+check("Warnung ist kein blockierendes Glied", "schedule" not in report["blocking"], report["blocking"])
+cfg.sync_times = ["00:10", "02:10", "04:10"]
+
+
 # ── 11. Befehlsliste ──────────────────────────────────────────────────
 print("\n[11] Befehlsliste")
 described = {d["command"]: d["requires_actions"] for d in remote_commands.describe()}
 for name in ("status", "logs", "config", "diag-upload", "diag-db", "files", "versions"):
     check(f"'{name}' ist lesend", described.get(name) is False, described.get(name))
-for name in ("sync", "bot", "rustdesk", "update", "customer-stats"):
+for name in ("sync", "bot", "rustdesk", "update", "customer-stats", "set", "cleanup"):
     check(f"'{name}' braucht Aktionsrecht", described.get(name) is True, described.get(name))
 check("kein Shell-Befehl in der Liste",
       not any("shell" in n or "exec" in n or "eval" in n for n in described),
