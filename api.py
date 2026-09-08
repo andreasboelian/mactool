@@ -9,7 +9,12 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from config import get_config, reload_config
+from config import (
+    MASK_CHAR,
+    get_config,
+    mask_key as _mask_key,
+    reload_config,
+)
 from sync import trigger_sync, check_dashboard_target
 from customer_stats import (
     run_customer_stats_upload,
@@ -17,8 +22,10 @@ from customer_stats import (
     SUPERDB_UNAVAILABLE_FIELDS,
 )
 import db_integrity
+import diagnostics
 import legacy_upload
 import mailer
+import remote_agent
 import run_state
 from device_monitor import (
     get_adb_devices,
@@ -38,6 +45,7 @@ from rustdesk_manager import (
 )
 from updater import check_for_updates, perform_update, get_current_version, get_available_versions
 from scheduler import get_scheduler
+from status import build_status
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +108,11 @@ class ConfigUpdate(BaseModel):
     alert_smtp_security: str | None = None
     alert_mail_cooldown_hours: int | None = None
 
+    # Fernzugriff
+    remote_control_enabled: bool | None = None
+    remote_allow_actions: bool | None = None
+    remote_poll_seconds: int | None = None
+
 
 class DeviceAction(BaseModel):
     """Device action model."""
@@ -123,18 +136,6 @@ class AgentRequest(BaseModel):
     """Path of a legacy upload LaunchAgent."""
 
     path: str
-
-
-MASK_CHAR = "•"
-
-
-def _mask_key(value: str) -> str:
-    """Show only the last 4 characters of a key."""
-    if not value:
-        return ""
-    if len(value) <= 4:
-        return MASK_CHAR * 8
-    return MASK_CHAR * 8 + value[-4:]
 
 
 def _apply_key(current: str, submitted: str | None) -> str:
@@ -410,6 +411,43 @@ async def get_dashboard():
                 <button class="btn" onclick="saveStatsSettings()">Einstellungen speichern</button>
                 <div id="stats-settings-msg"></div>
                 <div id="stats-run-msg"></div>
+            </div>
+
+            <div class="card" style="margin-bottom:30px;">
+                <h2>Fernzugriff</h2>
+                <div class="hint">Dieser Mac schaut regelmäßig in eine Tabelle der Dashboard-Supabase, ob dort ein Auftrag für ihn liegt, führt ihn aus und legt die Antwort daneben. So lässt sich der Mac aus der Ferne befragen, ohne einen Port zu öffnen. Ausgeführt wird nur, was auf der festen Befehlsliste steht — kein freies Shell.</div>
+
+                <div class="stats-block">
+                    <div class="stats-head">
+                        <div>
+                            <strong>Status</strong>
+                            <div class="hint" id="remote-hint">Wird geladen…</div>
+                        </div>
+                        <label class="switch"><input type="checkbox" id="remote-enabled"> Fernzugriff aktiv</label>
+                    </div>
+                    <div class="stats-head" style="margin-top:10px;">
+                        <div>
+                            <strong>Eingreifende Befehle</strong>
+                            <div class="hint">Aus = nur Status und Diagnose. Sync, Bot- und RustDesk-Steuerung sowie Update werden dann abgelehnt.</div>
+                        </div>
+                        <label class="switch"><input type="checkbox" id="remote-actions"> erlaubt</label>
+                    </div>
+                    <div class="row-actions" style="margin-top:12px;">
+                        <button class="btn btn-small" onclick="saveRemoteSettings()">Speichern</button>
+                        <button class="btn btn-small" style="background:#666;" onclick="loadRemote()">Aktualisieren</button>
+                        <span class="last-run" id="remote-pending"></span>
+                    </div>
+                    <div id="remote-msg"></div>
+                </div>
+
+                <div class="stats-block">
+                    <strong>Log-Upload analysieren</strong>
+                    <div class="hint">Geht die Upload-Kette Glied für Glied durch und nennt das erste, das blockiert. Ändert nichts — es wird nichts hochgeladen und nichts gespeichert.</div>
+                    <div class="row-actions" style="margin-top:10px;">
+                        <button class="btn btn-small" onclick="runUploadDiagnosis()">Jetzt analysieren</button>
+                    </div>
+                    <div id="remote-diag"></div>
+                </div>
             </div>
 
             <div class="card">
@@ -1160,6 +1198,78 @@ async def get_dashboard():
                 }
             }
 
+            async function loadRemote() {
+                const hint = document.getElementById('remote-hint');
+                const pending = document.getElementById('remote-pending');
+                try {
+                    const resp = await fetch('/api/remote/status');
+                    const data = await resp.json();
+
+                    document.getElementById('remote-enabled').checked = !!data.enabled;
+                    document.getElementById('remote-actions').checked = !!data.actions_allowed;
+
+                    if (!data.configured) {
+                        hint.innerHTML = '<strong>Kein Supabase-Key hinterlegt</strong> — ohne den gibt es keinen Briefkasten und keinen Fernzugriff.';
+                    } else if (!data.enabled) {
+                        hint.textContent = 'Ausgeschaltet — dieser Mac holt keine Aufträge ab.';
+                    } else if (data.reachable === false) {
+                        hint.innerHTML = `<strong>Tabelle nicht erreichbar:</strong> ${data.error || 'unbekannter Fehler'}. Ist tools/schema_remote.sql eingespielt?`;
+                    } else {
+                        hint.textContent = `Aktiv — schaut alle ${data.poll_seconds}s in „${data.commands_table}“. `
+                            + `${(data.commands || []).length} Befehle verfügbar.`;
+                    }
+
+                    const open = data.pending || [];
+                    pending.textContent = open.length
+                        ? `${open.length} offen: ${open.map(c => c.command + ' (' + c.status + ')').join(', ')}`
+                        : (data.reachable ? 'nichts offen' : '');
+                } catch (e) {
+                    hint.textContent = `Status nicht abrufbar: ${e.message}`;
+                }
+            }
+
+            async function saveRemoteSettings() {
+                const out = document.getElementById('remote-msg');
+                out.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Speichere...</div>';
+                try {
+                    const resp = await fetch('/api/config', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            remote_control_enabled: document.getElementById('remote-enabled').checked,
+                            remote_allow_actions: document.getElementById('remote-actions').checked
+                        })
+                    });
+                    const data = await resp.json();
+                    out.innerHTML = resp.ok
+                        ? '<div class="status-msg success">✓ Gespeichert. Ein Ein-/Ausschalten wirkt erst nach einem Neustart des Dienstes.</div>'
+                        : `<div class="status-msg error">✗ ${data.detail || 'Speichern fehlgeschlagen'}</div>`;
+                    if (resp.ok) loadRemote();
+                } catch (e) {
+                    out.innerHTML = `<div class="status-msg error">✗ Fehler: ${e.message}</div>`;
+                }
+            }
+
+            async function runUploadDiagnosis() {
+                const out = document.getElementById('remote-diag');
+                out.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Analysiere Upload-Kette...</div>';
+                try {
+                    const resp = await fetch('/api/diag/log-upload', { method: 'POST' });
+                    const data = await resp.json();
+                    if (!resp.ok) {
+                        out.innerHTML = `<div class="status-msg error">✗ ${data.detail || 'Analyse fehlgeschlagen'}</div>`;
+                        return;
+                    }
+                    const cls = (data.blocking || []).length ? 'error' : 'success';
+                    out.innerHTML = `<div class="status-msg ${cls}">${data.verdict}</div>`
+                        + '<pre style="font-size:11px;max-height:340px;overflow:auto;background:#f5f5f5;padding:10px;border-radius:4px;">'
+                        + JSON.stringify(data.steps, null, 2).replace(/</g, '&lt;')
+                        + '</pre>';
+                } catch (e) {
+                    out.innerHTML = `<div class="status-msg error">✗ Fehler: ${e.message}</div>`;
+                }
+            }
+
             async function testTarget(target, outputId) {
                 const out = document.getElementById(outputId);
                 out.innerHTML = '<div class="status-msg loading"><span class="spinner"></span> Teste Verbindung...</div>';
@@ -1308,8 +1418,10 @@ async def get_dashboard():
             loadDevices();
             loadVersions();
             loadStatsSettings();
+            loadRemote();
             setInterval(loadStatus, 30000);
             setInterval(loadDevices, 30000);
+            setInterval(loadRemote, 30000);
         </script>
     </body>
     </html>
@@ -1320,27 +1432,7 @@ async def get_dashboard():
 async def get_status():
     """Get system status."""
     try:
-        config = get_config()
-        scheduler = get_scheduler()
-
-        update_info = check_for_updates()
-
-        return {
-            "server_name": config.server_name,
-            "bot_running": is_bot_running(),
-            "auto_restart": is_auto_restart_enabled(),
-            "rustdesk_running": is_rustdesk_running(),
-            "rustdesk_watch": is_rustdesk_watch_enabled(),
-            "dashboard_stats_enabled": config.dashboard_stats_enabled,
-            "customer_stats_enabled": config.customer_stats_enabled,
-            "customer_stats_source": config.customer_stats_source,
-            "last_runs": run_state.get_runs(),
-            "sync_times": config.sync_times,
-            "jobs": scheduler.get_jobs(),
-            "version": get_current_version(),
-            "update_available": update_info.get("status") == "update_available",
-            "latest_version": update_info.get("latest", ""),
-        }
+        return build_status(check_updates=True)
     except Exception as e:
         logger.error(f"Failed to get status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1618,6 +1710,15 @@ async def update_config(update: ConfigUpdate):
         if update.alert_mail_cooldown_hours is not None:
             config.alert_mail_cooldown_hours = max(0, int(update.alert_mail_cooldown_hours))
 
+        # ── Fernzugriff ──
+        if update.remote_control_enabled is not None:
+            config.remote_control_enabled = update.remote_control_enabled
+        if update.remote_allow_actions is not None:
+            config.remote_allow_actions = update.remote_allow_actions
+        if update.remote_poll_seconds is not None:
+            # Unter 5 Sekunden ist die Poll-Schleife nur noch Last ohne Nutzen
+            config.remote_poll_seconds = max(5, int(update.remote_poll_seconds))
+
         config.save()
         logger.info("Configuration updated")
 
@@ -1633,6 +1734,33 @@ async def update_config(update: ConfigUpdate):
         raise
     except Exception as e:
         logger.error(f"Failed to update config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Fernzugriff ───────────────────────────────────────────────────────
+
+
+@app.get("/api/remote/status")
+async def get_remote_status():
+    """Zustand des Fernzugriffs plus die offenen Aufträge dieses Macs."""
+    import asyncio
+
+    try:
+        return await asyncio.to_thread(remote_agent.get_agent_state)
+    except Exception as e:
+        logger.error(f"Fernzugriff-Status nicht abrufbar: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/diag/log-upload")
+async def run_log_upload_diagnosis():
+    """Analysiert die Log-Upload-Kette. Rein lesend — lädt nichts hoch."""
+    import asyncio
+
+    try:
+        return await asyncio.to_thread(diagnostics.diagnose_log_upload)
+    except Exception as e:
+        logger.error(f"Upload-Diagnose fehlgeschlagen: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

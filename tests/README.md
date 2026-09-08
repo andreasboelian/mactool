@@ -23,6 +23,8 @@ Instagram-Passwörter im `args`-Block — die Fixtures sind deshalb komplett syn
 | `test_incomplete.py` | Ein Ziel ohne Key gilt nicht als „success" und deaktiviert das Altskript nicht. Regression zu v1.0.111. |
 | `test_permission.py` | Fehlende Schreibrechte brechen nach dem ersten Request ab statt 946-mal. Regression zu v1.0.112. |
 | `test_schema.py` | `Accept-Profile`/`Content-Profile` werden gesendet, sonst landet der Upload im falschen Schema. Regression zu v1.0.113. |
+| `test_integrity.py` | Eine beschädigte super.db stoppt den Upload und löst genau eine Mail aus. |
+| `test_remote.py` | Fernzugriff: Reservieren ist exklusiv (zwei Prozesse führen nichts doppelt aus), abgelaufene Befehle werden nicht ausgeführt, unbekannte Namen legen den Agenten nicht lahm, gesperrte Aktionen bleiben gesperrt, kein Geheimnis verlässt den Mac im Klartext, `logs --file` bricht nicht aus dem Log-Verzeichnis aus. Dazu die Log-Upload-Diagnose gegen eine Fixture mit bekannter Ursache. |
 
 ## Wenn ein Test rot wird
 

@@ -11,6 +11,7 @@ from customer_stats import run_customer_stats_upload
 from device_monitor import run_device_monitor_job
 from bot_manager import run_bot_manager_job
 from rustdesk_manager import run_rustdesk_manager_job
+from remote_agent import run_remote_agent_job
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,32 @@ class SchedulerManager:
 
         logger.info("RustDesk watchdog job registered")
 
+    def _register_remote_agent_job(self):
+        """Register the remote-control poll job (every N seconds)."""
+        config = get_config()
+
+        if not config.remote_control_enabled:
+            logger.info("Fernzugriff ist ausgeschaltet — kein Poll-Job registriert")
+            return
+
+        interval_seconds = max(5, int(config.remote_poll_seconds or 15))
+        logger.info(f"Registering remote agent job (every {interval_seconds} seconds)")
+
+        self.scheduler.add_job(
+            run_remote_agent_job,
+            trigger=IntervalTrigger(seconds=interval_seconds),
+            id="remote_agent",
+            name=f"Fernzugriff (alle {interval_seconds}s)",
+            replace_existing=True,
+            # Ein Sync über die Ferne dauert Minuten. Ohne diese beiden würde
+            # APScheduler unterdessen weitere Durchläufe starten und der Mac
+            # arbeitete denselben Befehl mehrfach ab.
+            max_instances=1,
+            coalesce=True,
+        )
+
+        logger.info("Remote agent job registered")
+
     def register_jobs(self):
         """Register all scheduled jobs."""
         if self._jobs_registered:
@@ -147,6 +174,7 @@ class SchedulerManager:
         self._register_device_monitor_job()
         self._register_bot_manager_job()
         self._register_rustdesk_manager_job()
+        self._register_remote_agent_job()
 
         self._jobs_registered = True
         logger.info("All jobs registered")

@@ -42,5 +42,11 @@
   "alert_smtp_user": "",
   "alert_smtp_password": "",
   "alert_smtp_security": "starttls",
-  "alert_mail_cooldown_hours": 6
+  "alert_mail_cooldown_hours": 6,
+
+  "remote_control_enabled": true,
+  "remote_allow_actions": true,
+  "remote_poll_seconds": 15,
+  "remote_commands_table": "mac_commands",
+  "remote_agents_table": "mac_agents"
 }

@@ -91,6 +91,21 @@ def main():
         action="store_true",
         help="Collect and map customer statistics without uploading, then exit",
     )
+    parser.add_argument(
+        "--diag-upload",
+        action="store_true",
+        help="Analyse why bot logs are not reaching the bucket, print JSON and exit",
+    )
+    parser.add_argument(
+        "--diag-db",
+        action="store_true",
+        help="Check the super.db and print row counts as JSON, then exit",
+    )
+    parser.add_argument(
+        "--remote-agent-once",
+        action="store_true",
+        help="Run one remote-control poll cycle and exit (for testing)",
+    )
 
     args = parser.parse_args()
 
@@ -130,6 +145,27 @@ def main():
             from bot_manager import restart_bot
             success = restart_bot()
             logger.info(f"Bot restart: {'success' if success else 'failed'}")
+            return
+
+        if args.diag_upload or args.diag_db:
+            import json
+            import diagnostics
+
+            result = (
+                diagnostics.diagnose_log_upload()
+                if args.diag_upload
+                else diagnostics.diagnose_database()
+            )
+            print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+            logger.info(f"Diagnose: {result.get('verdict')}")
+            return
+
+        if args.remote_agent_once:
+            import json
+            from remote_agent import poll_once
+
+            logger.info("Running one remote-control poll cycle...")
+            print(json.dumps(poll_once(), indent=2, ensure_ascii=False, default=str))
             return
 
         if args.customer_stats or args.customer_stats_preview:

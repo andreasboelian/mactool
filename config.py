@@ -12,6 +12,29 @@ logger = logging.getLogger(__name__)
 CONFIG_FILE = Path("config.json")
 DEFAULT_CONFIG_FILE = Path(__file__).parent / "config.json.example"
 
+MASK_CHAR = "•"
+
+# Alles, was nie im Klartext das Gerät verlassen darf — weder über das Dashboard
+# noch über den Fernzugriff. Die webhook_url gehört dazu: ihre ID *ist* das Geheimnis.
+SECRET_FIELDS = frozenset(
+    {
+        "supabase_key",
+        "customer_stats_key",
+        "customer_users_key",
+        "alert_smtp_password",
+        "webhook_url",
+    }
+)
+
+
+def mask_key(value: str) -> str:
+    """Show only the last 4 characters of a key."""
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return MASK_CHAR * 8
+    return MASK_CHAR * 8 + value[-4:]
+
 
 @dataclass
 class AppConfig:
@@ -75,6 +98,22 @@ class AppConfig:
     alert_smtp_security: str = "starttls"  # "starttls" | "ssl" | "none"
     # Bleibt die DB kaputt, nicht bei jedem Sync erneut mailen
     alert_mail_cooldown_hours: int = 6
+
+    # ── Fernzugriff ──────────────────────────────────────────────────
+    # Die Macs stehen hinter NAT und sind nur per RustDesk erreichbar — für eine
+    # Analyse aus der Ferne zu wenig. Statt einen Port zu öffnen holt sich der Mac
+    # seine Aufträge selbst aus einer Tabelle der Dashboard-Supabase (`supabase_url`
+    # / `supabase_key` oben) und legt die Antwort dort wieder ab.
+    #
+    # Ab Werk an: sonst müsste man jeden Mac per RustDesk anfassen, um genau das
+    # Werkzeug scharfzuschalten, das RustDesk ersparen soll.
+    remote_control_enabled: bool = True
+    # Aus = nur lesende Befehle. Sync, Bot-/RustDesk-Steuerung und Update werden
+    # dann abgelehnt, Status und Diagnose laufen weiter.
+    remote_allow_actions: bool = True
+    remote_poll_seconds: int = 15
+    remote_commands_table: str = "mac_commands"
+    remote_agents_table: str = "mac_agents"
 
     def save(self):
         """Save configuration to config.json."""
@@ -140,3 +179,18 @@ def reload_config() -> AppConfig:
     global _config_instance
     _config_instance = AppConfig.load()
     return _config_instance
+
+
+def masked_config_dict(config: Optional[AppConfig] = None) -> dict:
+    """The whole configuration with every secret replaced by its masked form.
+
+    Whitelist by exclusion on purpose: a field added later is exposed unless it is
+    listed in SECRET_FIELDS, so new *secrets* must be registered there. Keep this
+    the only way config leaves the machine — two maskings drift apart and one of
+    them eventually leaks a key.
+    """
+    config = config or get_config()
+    return {
+        name: mask_key(value) if name in SECRET_FIELDS else value
+        for name, value in asdict(config).items()
+    }

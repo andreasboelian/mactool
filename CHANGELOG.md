@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.0.115 — 2026-09-08
+- **Die Macs lassen sich aus der Ferne befragen.** Bisher war RustDesk der einzige Weg auf
+  einen Mac — also Bildschirm gucken statt analysieren, eine Sitzung pro Frage. Jetzt schaut
+  jeder Mac alle 15 Sekunden in die Tabelle `mac_commands` der Dashboard-Supabase, arbeitet
+  ab was für ihn dort liegt und schreibt die Antwort in dieselbe Zeile
+- Kein offener Port, kein VPN, keine neue Software: die Richtung dreht sich um, der Mac
+  ruft von sich aus an. `supabase_url` / `supabase_key` liegen ohnehin auf jedem Mac
+- **Neu: `tools/macctl.py`** — das Gegenstück für den eigenen Rechner:
+  `macctl.py mac07 diag-upload`, `macctl.py mac07,mac22 status`, `macctl.py all status`.
+  `macctl.py list` zeigt, welcher Mac sich überhaupt meldet und mit welcher Version
+- Ausgeführt wird ausschließlich eine **feste Befehlsliste**, kein freies Shell:
+  lesend `status`, `logs`, `config`, `files`, `diag-upload`, `diag-db`, `versions`,
+  `legacy-upload` — eingreifend `sync`, `customer-stats`, `bot`, `rustdesk`, `update`
+- Der Schalter „Eingreifende Befehle" sperrt die zweite Gruppe; dann sind nur noch Status
+  und Diagnose möglich. Beide Schalter stehen im Dashboard unter „Fernzugriff"
+- Ein Befehl trägt ein Verfallsdatum (Default 15 Minuten). Ein Mac, der drei Tage aus war,
+  arbeitet beim Hochfahren keine überholten Aufträge mehr ab — insbesondere kein `update`
+  auf eine Version von vorgestern
+- Reserviert wird über ein bedingtes UPDATE. Laufen versehentlich zwei mactool-Prozesse,
+  führt trotzdem genau einer den Befehl aus
+- Geheimnisse verlassen den Mac nie im Klartext: `config` maskiert Supabase-Keys,
+  SMTP-Passwort **und** die `webhook_url` — deren ID ist das Geheimnis
+- **Neu: Log-Upload-Diagnose.** Der Bucket-Upload ist eine Kette aus sieben Filtern; fällt
+  einer auf null, passiert nichts — ohne Fehler, ohne Meldung. Die Diagnose geht die Kette
+  Glied für Glied ab und nennt das erste, das blockiert: fehlender Key, beschädigte oder
+  fehlende super.db, leeres Logverzeichnis, kein Gerät mit „Phone" im Namen, kein Profil im
+  aktuellen Zeitfenster, Dateiname passt zu keinem Account, unlesbarer Zeitstempel,
+  unerreichbarer Bucket. Dazu der Bucket-Inhalt mit Datum: hat es je funktioniert, und
+  wann hörte es auf
+- Die Diagnose weist ausdrücklich auf die Punkt/Doppelpunkt-Falle hin: stehen die
+  Zeitfenster als `00.00-23.59` in der Datenbank, verglichen wird aber gegen `08:00-09:59`,
+  kann der Textvergleich nie zutreffen — der automatische Sync lädt dann nie etwas hoch,
+  der Knopf „Sync Now" dagegen schon
+- Erreichbar im Dashboard („Log-Upload analysieren"), über die Ferne (`diag-upload`) und
+  auf der Kommandozeile (`--diag-upload`, `--diag-db`). Rein lesend: lädt nichts hoch,
+  speichert nichts, verschickt keine Mail
+- Jeder Mac trägt sich einmal pro Minute in `mac_agents` ein. Damit ist ohne einen einzigen
+  Befehl sichtbar, welcher Mac läuft, auf welcher Version und ob Bot und RustDesk an sind
+- Voraussetzung: einmalig `tools/schema_remote.sql` im SQL-Editor der Dashboard-Supabase
+  ausführen. RLS ist an, ohne Policy — nur der service_role-Key kommt an die Tabellen
+- Aufräumen nebenbei: der Zustandsbericht (`status.py`) und die Maskierung (`config.py`)
+  haben jetzt je eine Quelle statt zwei, die auseinanderdriften konnten
+
 ## v1.0.114 — 2026-08-12
 - **Vor dem Supabase-Sync wird die super.db geprüft.** `PRAGMA integrity_check` läuft auf dem
   Original, *bevor* die Arbeitskopie gezogen wird. Ist die Datei beschädigt, findet **kein**

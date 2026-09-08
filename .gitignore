@@ -1,6 +1,9 @@
 # Sensitive config (contains supabase_key, webhook_url)
 config.json
 
+# Zugangsdaten fuer tools/macctl.py, falls jemand sie neben das Skript legt
+tools/remote.json
+
 # Runtime state
 device_state.json
 bot_state.json

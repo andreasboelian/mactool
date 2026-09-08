@@ -257,3 +257,75 @@ gestanden — jetzt aufgeteilt, 8 Meldungen plus Zaehler.
 **Offen:** Commit + Tag v1.0.114 + Push, danach pro Mac SMTP-Zugangsdaten eintragen und
 einmal "Testmail senden" druecken. Ohne SMTP-Daten unterbleibt der Upload bei einer
 kaputten DB trotzdem — die Meldung steht dann nur im Log.
+
+---
+
+# Fernzugriff auf die Macs (v1.0.115)
+
+Ziel: von hier aus Fragen an einen einzelnen Mac stellen und Antworten als Daten
+zurueckbekommen. Ausloeser: auf mac07 und mac22 landen keine Bot-Logs im Bucket, und der
+einzige Zugang war RustDesk — Bildschirm gucken statt analysieren.
+
+## Entscheidungen (mit Andreas abgestimmt)
+- **Transport = Supabase-Briefkasten** (Polling ~15s). Tailscale scheidet aus, weil es
+  bereits in einem anderen Tool haengt und dieser Weg nicht zusaetzlich angebunden werden
+  kann. Cloudflare Tunnel und Reverse-SSH waeren gegangen, brauchen aber neue Software auf
+  jedem Mac bzw. einen eigenen Server
+- **Befehlsumfang = Diagnose + Aktionen**, kein freies Shell
+- mac07 und mac22 laufen bereits als normale mactool-Installationen
+
+## Schritte
+- [x] `config.py`: `remote_control_enabled` (True), `remote_allow_actions` (True),
+      `remote_poll_seconds` (15), Tabellennamen. `_mask_key` von `api.py` hierher gezogen,
+      dazu `SECRET_FIELDS` + `masked_config_dict()` als einzige Ausgabestelle
+- [x] `status.py`: Zustandsbericht als eine Quelle fuer Dashboard und Fernzugriff
+- [x] `diagnostics.py`: Log-Upload-Kette Glied fuer Glied, plus `diagnose_database()`
+- [x] `remote_commands.py`: feste Befehlsliste, duenne Wrapper um vorhandenen Code
+- [x] `remote_agent.py`: holen, bedingt reservieren, Verfall, ausfuehren, zurueckschreiben,
+      Heartbeat max. 1x/60s
+- [x] `scheduler.py`: Poll-Job mit `max_instances=1, coalesce=True`
+- [x] `supabase_rest.py`: `update()` (PATCH mit `return=representation`) ergaenzt
+- [x] `tools/macctl.py` + `tools/schema_remote.sql`
+- [x] `api.py`: Karte „Fernzugriff", `GET /api/remote/status`, `POST /api/diag/log-upload`
+- [x] `main.py`: `--diag-upload`, `--diag-db`, `--remote-agent-once`
+- [x] `tests/test_remote.py` als 10. Suite
+
+## Review (08.09.2026)
+Gebaut wie geplant, 10 von 10 Testsuiten gruen (`./tests/run_all.sh`), keine Regression in
+den 9 bestehenden.
+
+**Was beim Bauen auffiel — moeglicherweise die Ursache fuer mac07/mac22:**
+Die Fixture speichert `startup_time__time_slot` als `00.00-23.59` (Punkte),
+`_get_previous_timeslot()` erzeugt aber `08:00-09:59` (Doppelpunkte). Der Abgleich in
+`log_uploader._get_allowed_usernames` ist ein reiner Textvergleich (`slot in time_slot`) und
+kann so **nie** zutreffen. Folge: der automatische Sync laedt nie Logs hoch, nur der Knopf
+„Sync Now" (`upload_all=True`) umgeht den Filter. Genau das Fehlerbild, das gemeldet wurde.
+Ob die echten Macs Punkte oder Doppelpunkte speichern, ist noch **nicht** belegt — die
+Diagnose beantwortet es (`steps.timeslot.configured_slots` und `hint`). Erst messen, dann
+reparieren.
+
+**Bewusste Entscheidungen:**
+- `remote_control_enabled` ab Werk **an**. Sonst muesste man jeden Mac per RustDesk
+  anfassen, um das Werkzeug scharfzuschalten, das RustDesk ersparen soll
+- Reservieren per bedingtem PATCH ohne Retry: ein wiederholtes PATCH wuerde seine eigene,
+  inzwischen falsche Bedingung erneut pruefen und eine Niederlage melden, die es nie gab
+- `update` schreibt sein Ergebnis **vor** der Ausfuehrung — der Prozess beendet sich zwei
+  Sekunden nach Erfolg selbst, danach kaeme kein Schreibvorgang mehr durch
+- `rustdesk stop` schaltet nur den Waechter ab und beendet kein laufendes RustDesk. Der
+  Fernzugriff soll nicht den letzten Notzugang kappen koennen
+- Die Diagnose importiert die Filter aus `log_uploader` statt sie nachzubauen. Eine
+  nachgebaute Diagnose driftet ab und behauptet irgendwann, alles sei in Ordnung
+
+**Verifiziert:**
+- Reservieren ist exklusiv (zweiter Zugriff auf dieselbe Zeile bekommt nichts)
+- abgelaufener Befehl wird `expired`, der Handler wird nachweislich nicht aufgerufen
+- unbekannter Name legt den Agenten nicht lahm, `poll_once` laeuft weiter
+- gesperrte Aktionen: `sync` abgelehnt, `status` laeuft
+- kein Geheimnis im Klartext: Supabase-Keys, SMTP-Passwort und `webhook_url` maskiert
+- `logs --file "../../../etc/passwd"` bricht nicht aus dem logs-Verzeichnis aus
+- Diagnose benennt bei leerer device-Tabelle die richtige Ursache und findet nach
+  Einfuegen eines Phone-Geraets Account, Datei, Zeitstempel und Zielpfad
+
+**Offen:** Tabellen anlegen (`tools/schema_remote.sql`), Zugangsdaten fuer `macctl.py`
+hinterlegen, mac07 + mac22 einmalig per Dashboard auf v1.0.115 heben, dann
+`macctl.py mac07,mac22 diag-upload` gegen einen funktionierenden Mac halten.

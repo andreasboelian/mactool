@@ -264,6 +264,38 @@ class SupabaseRest:
         response = self._request("GET", f"{self.base}/{table}", params=params)
         return response.json()
 
+    def update(
+        self,
+        table: str,
+        params: dict,
+        values: dict,
+        *,
+        retries: int = MAX_RETRIES,
+    ) -> list[dict]:
+        """PATCH rows matching `params` and return the rows actually changed.
+
+        The returned list is what makes a conditional update usable as a lock:
+        `PATCH ?id=eq.7&status=eq.queued` returns one row for whoever won and an
+        empty list for everyone else.
+
+        Pass ``retries=1`` for exactly that use. A retried PATCH would re-evaluate
+        its own condition — by then already false — and report a loss that never
+        happened.
+        """
+        response = self._request(
+            "PATCH",
+            f"{self.base}/{table}",
+            params=params,
+            payload=values,
+            headers={"Prefer": "return=representation"},
+            retries=retries,
+        )
+        try:
+            rows = response.json()
+        except ValueError:
+            return []
+        return rows if isinstance(rows, list) else [rows]
+
     # ── Writes ────────────────────────────────────────────────────────
 
     def _write_batch(
