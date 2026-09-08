@@ -2,6 +2,10 @@
 
 Vollständiges, produktionsreifes macOS-Backend-Tool für Bot-Automatisierung mit SQLite→Supabase Sync, ADB Device Monitoring, Bot.app Management und optional Web UI.
 
+> **Einen Mac aus der Ferne befragen oder steuern?** → **[tools/README.md](tools/README.md)**
+> Die Macs stehen hinter NAT; sie holen ihre Aufträge selbst aus einer Supabase-Tabelle ab.
+> Kein SSH, kein VPN, kein offener Port. Kurzform: `python3 tools/macctl.py list`
+
 ## Features
 
 ✅ **SQLite → Supabase Sync**
